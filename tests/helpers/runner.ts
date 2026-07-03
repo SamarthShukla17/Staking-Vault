@@ -34,14 +34,23 @@ import {
 
 const REWARD_RATE = 7;
 
-async function seedPool(ctx: SvmContext, totalStaked: number, rewardRate: number = REWARD_RATE) {
+async function seedPool(
+  ctx: SvmContext,
+  totalStaked: number,
+  rewardRate: number = REWARD_RATE,
+  needsRewardMint = false,
+) {
   const admin = Keypair.generate();
   const stakeMint = await createMint(ctx);
   const [pool, poolBump] = pdas.poolPda(ctx.program.programId, stakeMint);
   // reward_mint's mint authority must be the pool PDA so claim's mint_to CPI (signed by the
   // pool) is authorized. The PDA address is deterministic from stake_mint, so it's known here
   // even though the Pool account itself is only seeded (not really initialized) below.
-  const rewardMint = await createMint(ctx, 6, pool);
+  //
+  // stake/unstake never read pool.reward_mint, so scenarios that don't exercise claim() skip
+  // creating a real mint for it entirely — one fewer transaction in a process where every
+  // extra litesvm transaction adds to the odds of the native addon's std::bad_alloc crash.
+  const rewardMint = needsRewardMint ? await createMint(ctx, 6, pool) : Keypair.generate().publicKey;
 
   seedPoolAccount(ctx, pool, {
     admin: admin.publicKey,
@@ -365,7 +374,7 @@ const CLAIM_AMOUNT = 1_000;
 
 async function scenarioClaimA() {
   const ctx = startSvm();
-  const { pool, rewardMint } = await seedPool(ctx, 0, CLAIM_REWARD_RATE);
+  const { pool, rewardMint } = await seedPool(ctx, 0, CLAIM_REWARD_RATE, true);
 
   const user = Keypair.generate();
   airdrop(ctx.svm, user.publicKey);
@@ -394,7 +403,7 @@ async function scenarioClaimA() {
 
 async function scenarioClaimB() {
   const ctx = startSvm();
-  const { pool, rewardMint } = await seedPool(ctx, 0, CLAIM_REWARD_RATE);
+  const { pool, rewardMint } = await seedPool(ctx, 0, CLAIM_REWARD_RATE, true);
 
   const user = Keypair.generate();
   airdrop(ctx.svm, user.publicKey);
@@ -429,7 +438,7 @@ async function scenarioClaimB() {
 
 async function scenarioClaimC() {
   const ctx = startSvm();
-  const { pool, rewardMint } = await seedPool(ctx, 0, CLAIM_REWARD_RATE);
+  const { pool, rewardMint } = await seedPool(ctx, 0, CLAIM_REWARD_RATE, true);
 
   const user = Keypair.generate();
   airdrop(ctx.svm, user.publicKey);
@@ -452,7 +461,7 @@ async function scenarioClaimC() {
 
 async function scenarioClaimD() {
   const ctx = startSvm();
-  const { pool, rewardMint } = await seedPool(ctx, 0, CLAIM_REWARD_RATE);
+  const { pool, rewardMint } = await seedPool(ctx, 0, CLAIM_REWARD_RATE, true);
 
   const user = Keypair.generate();
   airdrop(ctx.svm, user.publicKey);
@@ -625,6 +634,212 @@ async function scenarioSecurityOverdrawC() {
   };
 }
 
+/**
+ * Security suite: 02_drain_other_user. StakeAccount PDAs are seeded from [STAKE_SEED, pool,
+ * owner], so a signer can never make the seeds constraint resolve to someone else's position —
+ * passing another user's stake_account address while signing as yourself must fail the seeds
+ * re-derivation before the handler body (and its owner constraint) ever runs.
+ */
+async function scenarioSecurityDrainA() {
+  const ctx = startSvm();
+  const victimAmount = 5_000;
+  const attackerAmount = 100;
+  const { stakeMint, pool, vault } = await seedPool(ctx, victimAmount + attackerAmount);
+
+  const victim = Keypair.generate();
+  const [victimStakeAccount, victimBump] = pdas.stakePda(ctx.program.programId, pool, victim.publicKey);
+  seedStakeAccount(ctx, victimStakeAccount, {
+    owner: victim.publicKey,
+    amount: victimAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: victimBump,
+  });
+
+  const attacker = Keypair.generate();
+  const attackerAta = await createAtaAndMint(ctx, stakeMint, attacker.publicKey, 0);
+  const [attackerStakeAccount, attackerBump] = pdas.stakePda(ctx.program.programId, pool, attacker.publicKey);
+  seedStakeAccount(ctx, attackerStakeAccount, {
+    owner: attacker.publicKey,
+    amount: attackerAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: attackerBump,
+  });
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    // Attacker signs, but swaps in the VICTIM's stake_account and routes the withdrawal to
+    // the attacker's own ATA instead of the victim's.
+    await ctx.program.methods
+      .unstake(new BN(100))
+      .accountsStrict({
+        user: attacker.publicKey,
+        pool,
+        stakeAccount: victimStakeAccount,
+        userStakeAta: attackerAta,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([attacker])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const victimStakeData = await ctx.program.account.stakeAccount.fetch(victimStakeAccount);
+  const attackerStakeData = await ctx.program.account.stakeAccount.fetch(attackerStakeAccount);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    victimAmount: victimStakeData.amount.toNumber(),
+    attackerAmount: attackerStakeData.amount.toNumber(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+async function scenarioSecurityDrainB() {
+  const ctx = startSvm();
+  const victimAmount = 5_000;
+  const attackerAmount = 100;
+  const { stakeMint, pool, vault } = await seedPool(ctx, victimAmount + attackerAmount);
+
+  const victim = Keypair.generate();
+  const [victimStakeAccount, victimBump] = pdas.stakePda(ctx.program.programId, pool, victim.publicKey);
+  seedStakeAccount(ctx, victimStakeAccount, {
+    owner: victim.publicKey,
+    amount: victimAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: victimBump,
+  });
+
+  const attacker = Keypair.generate();
+  const attackerAta = await createAtaAndMint(ctx, stakeMint, attacker.publicKey, 0);
+  const [attackerStakeAccount, attackerBump] = pdas.stakePda(ctx.program.programId, pool, attacker.publicKey);
+  seedStakeAccount(ctx, attackerStakeAccount, {
+    owner: attacker.publicKey,
+    amount: attackerAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: attackerBump,
+  });
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    // Same substitution as case A, but this time the attacker goes for the victim's entire
+    // balance in one shot rather than a small amount.
+    await ctx.program.methods
+      .unstake(new BN(victimAmount))
+      .accountsStrict({
+        user: attacker.publicKey,
+        pool,
+        stakeAccount: victimStakeAccount,
+        userStakeAta: attackerAta,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([attacker])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const victimStakeData = await ctx.program.account.stakeAccount.fetch(victimStakeAccount);
+  const attackerStakeData = await ctx.program.account.stakeAccount.fetch(attackerStakeAccount);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    victimAmount: victimStakeData.amount.toNumber(),
+    attackerAmount: attackerStakeData.amount.toNumber(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+async function scenarioSecurityDrainC() {
+  const ctx = startSvm();
+  const victimAmount = 5_000;
+  const attackerAmount = 100;
+  const { pool, rewardMint, vault } = await seedPool(ctx, victimAmount + attackerAmount, CLAIM_REWARD_RATE, true);
+
+  const victim = Keypair.generate();
+  const [victimStakeAccount, victimBump] = pdas.stakePda(ctx.program.programId, pool, victim.publicKey);
+  // Nonzero, meaningful accrued progress (2 * SCALE + remainder) so "unchanged" is a real
+  // assertion, not a trivial 0 == 0.
+  const victimPoints = 2_500_000_000_000n;
+  seedStakeAccount(ctx, victimStakeAccount, {
+    owner: victim.publicKey,
+    amount: victimAmount,
+    points: victimPoints,
+    lastUpdateTs: 0,
+    bump: victimBump,
+  });
+
+  const attacker = Keypair.generate();
+  airdrop(ctx.svm, attacker.publicKey);
+  const [attackerStakeAccount, attackerBump] = pdas.stakePda(ctx.program.programId, pool, attacker.publicKey);
+  seedStakeAccount(ctx, attackerStakeAccount, {
+    owner: attacker.publicKey,
+    amount: attackerAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: attackerBump,
+  });
+
+  const attackerRewardAta = pdas.vaultAta(rewardMint, attacker.publicKey);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    // Attacker signs, but swaps in the VICTIM's stake_account, trying to claim the victim's
+    // accrued points as rewards minted into the attacker's own reward ATA.
+    await ctx.program.methods
+      .claim()
+      .accountsStrict({
+        user: attacker.publicKey,
+        pool,
+        stakeAccount: victimStakeAccount,
+        rewardMint,
+        userRewardAta: attackerRewardAta,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([attacker])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const victimStakeData = await ctx.program.account.stakeAccount.fetch(victimStakeAccount);
+  const attackerStakeData = await ctx.program.account.stakeAccount.fetch(attackerStakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    victimPoints: bnToBigInt(victimStakeData.points).toString(),
+    victimAmount: victimStakeData.amount.toNumber(),
+    attackerAmount: attackerStakeData.amount.toNumber(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
 const scenarios: Record<string, () => Promise<unknown>> = {
   "stake-a": scenarioStakeA,
   "stake-b": scenarioStakeB,
@@ -641,6 +856,9 @@ const scenarios: Record<string, () => Promise<unknown>> = {
   "security-overdraw-a": scenarioSecurityOverdrawA,
   "security-overdraw-b": scenarioSecurityOverdrawB,
   "security-overdraw-c": scenarioSecurityOverdrawC,
+  "security-drain-a": scenarioSecurityDrainA,
+  "security-drain-b": scenarioSecurityDrainB,
+  "security-drain-c": scenarioSecurityDrainC,
 };
 
 async function main() {
