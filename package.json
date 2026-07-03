@@ -8,7 +8,7 @@
     "services/*"
   ],
   "scripts": {
-    "test:program": "ts-mocha -p ./tsconfig.json -t 200000 tests/**/*.test.ts"
+    "test:program": "ts-mocha -p ./tsconfig.json -t 200000 \"tests/**/*.test.ts\""
   },
   "devDependencies": {
     "typescript": "^6.0.3",

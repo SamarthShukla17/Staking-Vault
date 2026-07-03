@@ -488,6 +488,143 @@ async function scenarioClaimD() {
   };
 }
 
+/**
+ * Security suite: 01_unstake_exceeds_stake. A single stake_account's `amount` field must be
+ * the sole source of truth for how much a given owner can withdraw — never the vault's raw
+ * token balance (which reflects every position's stake pooled together).
+ */
+async function scenarioSecurityOverdrawA() {
+  const ctx = startSvm();
+  const { stakeMint, pool, vault } = await seedPool(ctx, 1_000);
+
+  const user = Keypair.generate();
+  const userAta = await createAtaAndMint(ctx, stakeMint, user.publicKey, 0);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: 1_000,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  await unstakeAs(ctx, pool, vault, user, userAta, 600);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await unstakeAs(ctx, pool, vault, user, userAta, 401);
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    vaultAmount: vaultAccount.amount.toString(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+async function scenarioSecurityOverdrawB() {
+  const ctx = startSvm();
+  const { stakeMint, pool, vault } = await seedPool(ctx, 400);
+
+  const user = Keypair.generate();
+  const userAta = await createAtaAndMint(ctx, stakeMint, user.publicKey, 0);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: 400,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  // Drain to exactly zero (this is the boundary case: nothing left, not just "less than asked").
+  await unstakeAs(ctx, pool, vault, user, userAta, 400);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await unstakeAs(ctx, pool, vault, user, userAta, 1);
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    vaultAmount: vaultAccount.amount.toString(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+async function scenarioSecurityOverdrawC() {
+  const ctx = startSvm();
+  const victimAmount = 400;
+  const attackerAmount = 10_000;
+  const { stakeMint, pool, vault } = await seedPool(ctx, victimAmount + attackerAmount);
+
+  const victim = Keypair.generate();
+  const victimAta = await createAtaAndMint(ctx, stakeMint, victim.publicKey, 0);
+  const [victimStakeAccount, victimBump] = pdas.stakePda(ctx.program.programId, pool, victim.publicKey);
+  seedStakeAccount(ctx, victimStakeAccount, {
+    owner: victim.publicKey,
+    amount: victimAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: victimBump,
+  });
+
+  // A separate, unrelated position in the same pool — funds the vault well past what the
+  // victim alone could ever legitimately withdraw.
+  const attacker = Keypair.generate();
+  const [attackerStakeAccount, attackerBump] = pdas.stakePda(ctx.program.programId, pool, attacker.publicKey);
+  seedStakeAccount(ctx, attackerStakeAccount, {
+    owner: attacker.publicKey,
+    amount: attackerAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: attackerBump,
+  });
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await unstakeAs(ctx, pool, vault, victim, victimAta, victimAmount + 1);
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const victimStakeData = await ctx.program.account.stakeAccount.fetch(victimStakeAccount);
+  const attackerStakeData = await ctx.program.account.stakeAccount.fetch(attackerStakeAccount);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    victimAmount: victimStakeData.amount.toNumber(),
+    attackerAmount: attackerStakeData.amount.toNumber(),
+  };
+}
+
 const scenarios: Record<string, () => Promise<unknown>> = {
   "stake-a": scenarioStakeA,
   "stake-b": scenarioStakeB,
@@ -501,6 +638,9 @@ const scenarios: Record<string, () => Promise<unknown>> = {
   "claim-b": scenarioClaimB,
   "claim-c": scenarioClaimC,
   "claim-d": scenarioClaimD,
+  "security-overdraw-a": scenarioSecurityOverdrawA,
+  "security-overdraw-b": scenarioSecurityOverdrawB,
+  "security-overdraw-c": scenarioSecurityOverdrawC,
 };
 
 async function main() {
