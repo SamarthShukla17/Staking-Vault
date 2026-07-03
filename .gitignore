@@ -1,0 +1,12 @@
+target/
+node_modules/
+.anchor/
+.env*
+test-ledger/
+dist/
+.next/
+.DS_Store
+**/*.rs.bk
+.yarn/
+.surfpool/
+.claude/settings.local.json
