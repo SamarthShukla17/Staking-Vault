@@ -1267,6 +1267,221 @@ async function scenarioSecurityWrongRewardMintC() {
   };
 }
 
+/**
+ * Security suite: 05_reinit_pool. `initialize_pool`'s `pool` account uses Anchor `init` (never
+ * `init_if_needed`) — a second init attempt against the same [POOL_SEED, stake_mint] PDA must
+ * be rejected at the runtime level (the account is already funded/owned/discriminated), before
+ * handle_initialize_pool ever runs. The Pool account is seeded directly (see runner.ts's top
+ * comment) to represent "a real initializePool already succeeded" — from the `init` constraint's
+ * perspective this is indistinguishable from a genuine prior call, since it only inspects the
+ * target account's current on-chain bytes, not how they got there.
+ */
+async function scenarioSecurityReinitA() {
+  const ctx = startSvm();
+  const admin = Keypair.generate();
+  const attacker = Keypair.generate();
+  airdrop(ctx.svm, admin.publicKey);
+  airdrop(ctx.svm, attacker.publicKey);
+
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: admin.publicKey });
+  const originalRewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, originalRewardMint, { mintAuthority: admin.publicKey });
+
+  const ORIGINAL_RATE = 7;
+  const [pool, poolBump] = pdas.poolPda(ctx.program.programId, stakeMint);
+  seedPoolAccount(ctx, pool, {
+    admin: admin.publicKey,
+    stakeMint,
+    rewardMint: originalRewardMint,
+    rewardRate: ORIGINAL_RATE,
+    totalStaked: 0,
+    bump: poolBump,
+  });
+
+  // Attacker controls their own reward mint, wholly separate from the pool's real one.
+  const attackerRewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, attackerRewardMint, { mintAuthority: attacker.publicKey });
+  const vault = pdas.vaultAta(stakeMint, pool);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    // Attacker signs as `admin`, reuses the SAME stake_mint (so the pool PDA derivation lands
+    // on the exact same address), and supplies their own reward_mint and rate — trying to
+    // hijack the existing pool by "re-initializing" it as themselves.
+    await ctx.program.methods
+      .initializePool(new BN(1))
+      .accountsStrict({
+        admin: attacker.publicKey,
+        pool,
+        stakeMint,
+        rewardMint: attackerRewardMint,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([attacker])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    admin: poolData.admin.toBase58(),
+    originalAdmin: admin.publicKey.toBase58(),
+    attacker: attacker.publicKey.toBase58(),
+    stakeMint: poolData.stakeMint.toBase58(),
+    expectedStakeMint: stakeMint.toBase58(),
+    rewardMint: poolData.rewardMint.toBase58(),
+    expectedRewardMint: originalRewardMint.toBase58(),
+    attackerRewardMint: attackerRewardMint.toBase58(),
+    rewardRate: poolData.rewardRate.toNumber(),
+    originalRate: ORIGINAL_RATE,
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+async function scenarioSecurityReinitB() {
+  const ctx = startSvm();
+  const admin = Keypair.generate();
+  airdrop(ctx.svm, admin.publicKey);
+
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: admin.publicKey });
+  const rewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, rewardMint, { mintAuthority: admin.publicKey });
+
+  const ORIGINAL_RATE = 7;
+  const [pool, poolBump] = pdas.poolPda(ctx.program.programId, stakeMint);
+  seedPoolAccount(ctx, pool, {
+    admin: admin.publicKey,
+    stakeMint,
+    rewardMint,
+    rewardRate: ORIGINAL_RATE,
+    totalStaked: 0,
+    bump: poolBump,
+  });
+
+  const vault = pdas.vaultAta(stakeMint, pool);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    // The ORIGINAL admin, with the exact same accounts and rate as before — idempotent re-init
+    // is still re-init, and must be rejected identically to an attacker's attempt.
+    await ctx.program.methods
+      .initializePool(new BN(ORIGINAL_RATE))
+      .accountsStrict({
+        admin: admin.publicKey,
+        pool,
+        stakeMint,
+        rewardMint,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([admin])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    admin: poolData.admin.toBase58(),
+    originalAdmin: admin.publicKey.toBase58(),
+    stakeMint: poolData.stakeMint.toBase58(),
+    expectedStakeMint: stakeMint.toBase58(),
+    rewardMint: poolData.rewardMint.toBase58(),
+    expectedRewardMint: rewardMint.toBase58(),
+    rewardRate: poolData.rewardRate.toNumber(),
+    originalRate: ORIGINAL_RATE,
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+// Deliberate exception to the "one real invocation per process" rule (see this file's top
+// comment): proving a pre-existing staker's position survives a re-init attempt genuinely
+// requires the failing initializePool call and the succeeding unstake call to be real
+// transactions in the same litesvm session — there's nothing to seed around here, since the
+// whole point is to observe the failed attack and the subsequent legitimate withdrawal in the
+// same on-chain state. Absorbed by runScenario's 80-attempt retry loop, same as
+// scenarioSecurityWrongRewardMintC.
+async function scenarioSecurityReinitC() {
+  const ctx = startSvm();
+  const admin = Keypair.generate();
+  const attacker = Keypair.generate();
+  airdrop(ctx.svm, admin.publicKey);
+  airdrop(ctx.svm, attacker.publicKey);
+
+  const stakedAmount = 1_000;
+  const { stakeMint, pool, vault } = await seedPool(ctx, stakedAmount);
+
+  const user = Keypair.generate();
+  const userAta = pdas.vaultAta(stakeMint, user.publicKey);
+  seedTokenAccount(ctx, userAta, { mint: stakeMint, owner: user.publicKey, amount: 0 });
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: stakedAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  const attackerRewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, attackerRewardMint, { mintAuthority: attacker.publicKey });
+
+  let reinitFailed = false;
+  try {
+    await ctx.program.methods
+      .initializePool(new BN(1))
+      .accountsStrict({
+        admin: attacker.publicKey,
+        pool,
+        stakeMint,
+        rewardMint: attackerRewardMint,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([attacker])
+      .rpc();
+  } catch {
+    reinitFailed = true;
+  }
+
+  // The pre-existing staker's position must be completely unaffected by the failed attack, and
+  // still able to unstake normally afterward.
+  await unstakeAs(ctx, pool, vault, user, userAta, stakedAmount);
+
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const userAtaAccount = await getAccount(ctx.provider.connection, userAta);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    reinitFailed,
+    vaultAmount: vaultAccount.amount.toString(),
+    userAtaAmount: userAtaAccount.amount.toString(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
 const scenarios: Record<string, () => Promise<unknown>> = {
   "stake-a": scenarioStakeA,
   "stake-b": scenarioStakeB,
@@ -1292,6 +1507,9 @@ const scenarios: Record<string, () => Promise<unknown>> = {
   "security-wrong-reward-mint-a": scenarioSecurityWrongRewardMintA,
   "security-wrong-reward-mint-b": scenarioSecurityWrongRewardMintB,
   "security-wrong-reward-mint-c": scenarioSecurityWrongRewardMintC,
+  "security-reinit-a": scenarioSecurityReinitA,
+  "security-reinit-b": scenarioSecurityReinitB,
+  "security-reinit-c": scenarioSecurityReinitC,
 };
 
 async function main() {
