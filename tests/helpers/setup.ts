@@ -12,8 +12,12 @@ import {
   Transaction,
 } from "@solana/web3.js";
 import {
+  ACCOUNT_SIZE,
+  AccountLayout,
+  AccountState,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   MINT_SIZE,
+  MintLayout,
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountInstruction,
   createInitializeMint2Instruction,
@@ -90,6 +94,81 @@ export async function createAtaAndMint(
   const signers = mintAuthority.publicKey.equals(provider.wallet.publicKey) ? [] : [mintAuthority];
   await provider.sendAndConfirm!(tx, signers);
   return ata;
+}
+
+export interface MintSeed {
+  mintAuthority: PublicKey | null;
+  supply?: bigint | number;
+  decimals?: number;
+  freezeAuthority?: PublicKey | null;
+}
+
+/**
+ * Writes a valid SPL Mint account's raw bytes directly into LiteSVM, bypassing the real
+ * CreateAccount + InitializeMint2 transaction that `createMint` sends. Every real transaction —
+ * even ones that never touch the staking_vault program, like creating a plain SPL mint — adds
+ * to the odds of litesvm's native addon corrupting its own heap and aborting with
+ * `std::bad_alloc` (see runScenario's doc comment). Since a scenario only needs the *state* a
+ * mint/token-account would have after such a transaction, not the transaction itself, seeding
+ * the bytes directly is both faster and immune to that crash.
+ */
+export function seedMint(ctx: SvmContext, mint: PublicKey, seed: MintSeed): void {
+  const data = Buffer.alloc(MINT_SIZE);
+  MintLayout.encode(
+    {
+      mintAuthorityOption: seed.mintAuthority ? 1 : 0,
+      mintAuthority: seed.mintAuthority ?? PublicKey.default,
+      supply: BigInt(seed.supply ?? 0),
+      decimals: seed.decimals ?? 6,
+      isInitialized: true,
+      freezeAuthorityOption: seed.freezeAuthority ? 1 : 0,
+      freezeAuthority: seed.freezeAuthority ?? PublicKey.default,
+    },
+    data,
+  );
+  const lamports = Number(ctx.svm.getRent().minimumBalance(BigInt(MINT_SIZE)));
+  ctx.svm.setAccount(mint, {
+    lamports,
+    data,
+    owner: TOKEN_PROGRAM_ID,
+    executable: false,
+    rentEpoch: 0,
+  });
+}
+
+export interface TokenAccountSeed {
+  mint: PublicKey;
+  owner: PublicKey;
+  amount: bigint | number;
+}
+
+/** Writes a valid SPL TokenAccount's raw bytes directly into LiteSVM; see seedMint for why. */
+export function seedTokenAccount(ctx: SvmContext, account: PublicKey, seed: TokenAccountSeed): void {
+  const data = Buffer.alloc(ACCOUNT_SIZE);
+  AccountLayout.encode(
+    {
+      mint: seed.mint,
+      owner: seed.owner,
+      amount: BigInt(seed.amount),
+      delegateOption: 0,
+      delegate: PublicKey.default,
+      state: AccountState.Initialized,
+      isNativeOption: 0,
+      isNative: 0n,
+      delegatedAmount: 0n,
+      closeAuthorityOption: 0,
+      closeAuthority: PublicKey.default,
+    },
+    data,
+  );
+  const lamports = Number(ctx.svm.getRent().minimumBalance(BigInt(ACCOUNT_SIZE)));
+  ctx.svm.setAccount(account, {
+    lamports,
+    data,
+    owner: TOKEN_PROGRAM_ID,
+    executable: false,
+    rentEpoch: 0,
+  });
 }
 
 /** Advances the on-chain clock's unix timestamp by `seconds`, leaving slot/epoch untouched. */
