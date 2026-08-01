@@ -216,14 +216,16 @@ export const pdas = { poolPda, stakePda, vaultAta };
 export { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID };
 
 /**
- * Safely converts a fetched u128 BN (e.g. StakeAccount.points) to a bigint via its raw bytes.
- * `BN.prototype.toString(10)` has a real, reproducible bug for BNs decoded from a fixed-width
- * 16-byte buffer with trailing zero words (their `words` array is longer than their effective
- * `length`) — it intermittently renders as e.g. "500000000NaN". Reading the bytes directly
- * sidesteps that entirely.
+ * Safely converts a fetched u128 or u64 BN (e.g. StakeAccount.points, Pool.total_staked near
+ * u64::MAX) to a bigint via its raw bytes. `BN.prototype.toString(10)` has a real, reproducible
+ * bug for BNs decoded from a fixed-width buffer with trailing zero words (their `words` array is
+ * longer than their effective `length`) — it intermittently renders as e.g. "500000000NaN",
+ * observed for both 16-byte (u128) and 8-byte (u64) buffers at large enough values. Reading the
+ * bytes directly sidesteps that entirely. `length` is the field's byte width: 16 for u128, 8 for
+ * u64 (defaults to 16 since points is the most common caller).
  */
-export function bnToBigInt(bn: { toArray: (endian: "le" | "be", length: number) => number[] }): bigint {
-  const bytes = bn.toArray("le", 16);
+export function bnToBigInt(bn: { toArray: (endian: "le" | "be", length: number) => number[] }, length = 16): bigint {
+  const bytes = bn.toArray("le", length);
   let result = 0n;
   for (let i = bytes.length - 1; i >= 0; i--) {
     result = (result << 8n) | BigInt(bytes[i]);

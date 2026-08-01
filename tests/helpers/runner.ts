@@ -29,7 +29,7 @@
  */
 import { BN } from "@coral-xyz/anchor";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
-import { getAccount } from "@solana/spl-token";
+import { getAccount, getMint } from "@solana/spl-token";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   SvmContext,
@@ -1482,6 +1482,441 @@ async function scenarioSecurityReinitC() {
   };
 }
 
+/**
+ * Security suite: 06_double_claim. Covers claiming twice for the same accrued points, claiming
+ * against a StakeAccount PDA that was never initialized, claiming after a full unstake drains
+ * `amount` to zero, and splitting one claim into many to try to round in the user's favor.
+ */
+const DOUBLE_CLAIM_RATE = 1_000_000;
+const DOUBLE_CLAIM_AMOUNT = 1_000;
+
+async function scenarioSecurityDoubleClaimA() {
+  const ctx = startSvm();
+  const { pool, rewardMint, vault } = await seedPool(ctx, DOUBLE_CLAIM_AMOUNT, DOUBLE_CLAIM_RATE, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: DOUBLE_CLAIM_AMOUNT,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  // points = 1_000 * 1500 * 1_000_000 = 1_500_000_000_000 = 1*SCALE + 500_000_000_000
+  warpBySeconds(ctx.svm, 1500);
+
+  const { userRewardAta } = await claimAs(ctx, pool, rewardMint, user);
+
+  const rewardAccount = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    reward: rewardAccount.amount.toString(),
+    points: bnToBigInt(stakeAccountData.points).toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+  };
+}
+
+async function scenarioSecurityDoubleClaimB() {
+  const ctx = startSvm();
+  const { pool, rewardMint, vault } = await seedPool(ctx, DOUBLE_CLAIM_AMOUNT, DOUBLE_CLAIM_RATE, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  // Seeded to the exact state a real first claim() (at t=1500) would have left behind: 1_000 *
+  // 1500 * 1_000_000 = 1.5e12 points floored to 1 minted token with a 5e11 remainder. Only the
+  // immediate second claim below (zero elapsed time) runs as a real transaction.
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: DOUBLE_CLAIM_AMOUNT,
+    points: 500_000_000_000n,
+    lastUpdateTs: 1500,
+    bump: stakeBump,
+  });
+  const userRewardAta = pdas.vaultAta(rewardMint, user.publicKey);
+  seedTokenAccount(ctx, userRewardAta, { mint: rewardMint, owner: user.publicKey, amount: 1 });
+
+  // Advance the genesis clock to match the seeded last_update_ts before the real claim runs, or
+  // accrue() sees now < last_update_ts and rejects with ClockWentBackwards.
+  warpBySeconds(ctx.svm, 1500);
+  await claimAs(ctx, pool, rewardMint, user);
+
+  const rewardAfterSecond = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    rewardAfterFirst: "1",
+    rewardAfterSecond: rewardAfterSecond.amount.toString(),
+    points: bnToBigInt(stakeAccountData.points).toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+  };
+}
+
+async function scenarioSecurityDoubleClaimC() {
+  const ctx = startSvm();
+  const { pool, rewardMint, vault } = await seedPool(ctx, 0, DOUBLE_CLAIM_RATE, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  // No StakeAccount is ever seeded or created for this user — claim must be rejected purely
+  // because the PDA has never been initialized, before any accrual or minting logic runs.
+  const [stakeAccount] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  const userRewardAta = pdas.vaultAta(rewardMint, user.publicKey);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await ctx.program.methods
+      .claim()
+      .accountsStrict({
+        user: user.publicKey,
+        pool,
+        stakeAccount,
+        rewardMint,
+        userRewardAta,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([user])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const rewardMintInfo = await getMint(ctx.provider.connection, rewardMint);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    rewardSupply: rewardMintInfo.supply.toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+async function scenarioSecurityDoubleClaimD() {
+  const ctx = startSvm();
+  const { pool, rewardMint, vault } = await seedPool(ctx, 0, DOUBLE_CLAIM_RATE, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  // Seeded to the state a real stake(1_000) followed by a real, full unstake(1_000) at the same
+  // instant would have left behind: amount back to 0, but a genuine unclaimed remainder (2.5 *
+  // SCALE — 2 whole reward tokens plus dust) accrued while the position was staked still sits in
+  // `points`, since unstake's accrue() call runs before the balance changes and never touches it.
+  const preexistingRemainder = 2_500_000_000_000n;
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: 0,
+    points: preexistingRemainder,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  // amount is 0, so 1000s of elapsed time accrues zero new points — the only points at claim
+  // time are the pre-existing remainder from before the full unstake.
+  warpBySeconds(ctx.svm, 1000);
+
+  const { userRewardAta } = await claimAs(ctx, pool, rewardMint, user);
+
+  const rewardAccount = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    reward: rewardAccount.amount.toString(),
+    points: bnToBigInt(stakeAccountData.points).toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+  };
+}
+
+const DOUBLE_CLAIM_TOTAL_ELAPSED = 2500;
+const DOUBLE_CLAIM_SPLIT_ELAPSED = 1300;
+
+async function scenarioSecurityDoubleClaimESmall() {
+  const ctx = startSvm();
+  const { pool, rewardMint, vault } = await seedPool(ctx, DOUBLE_CLAIM_AMOUNT, DOUBLE_CLAIM_RATE, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: DOUBLE_CLAIM_AMOUNT,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  // Two real claims splitting the same total elapsed time as scenarioSecurityDoubleClaimELarge,
+  // to prove splitting one claim into many can never mint more than claiming once at the end.
+  // claim() takes no arguments, so back-to-back calls with an unexpired blockhash would produce
+  // identical transaction signatures and get rejected as duplicates — expire it between calls
+  // to force a fresh signature for the second, otherwise-identical claim() transaction.
+  warpBySeconds(ctx.svm, DOUBLE_CLAIM_SPLIT_ELAPSED);
+  await claimAs(ctx, pool, rewardMint, user);
+  ctx.svm.expireBlockhash();
+  warpBySeconds(ctx.svm, DOUBLE_CLAIM_TOTAL_ELAPSED - DOUBLE_CLAIM_SPLIT_ELAPSED);
+  const { userRewardAta } = await claimAs(ctx, pool, rewardMint, user);
+
+  const rewardAccount = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    totalReward: rewardAccount.amount.toString(),
+    points: bnToBigInt(stakeAccountData.points).toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+  };
+}
+
+async function scenarioSecurityDoubleClaimELarge() {
+  const ctx = startSvm();
+  const { pool, rewardMint, vault } = await seedPool(ctx, DOUBLE_CLAIM_AMOUNT, DOUBLE_CLAIM_RATE, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: DOUBLE_CLAIM_AMOUNT,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  // One real claim over the identical total elapsed time as the split-claim scenario above.
+  warpBySeconds(ctx.svm, DOUBLE_CLAIM_TOTAL_ELAPSED);
+  const { userRewardAta } = await claimAs(ctx, pool, rewardMint, user);
+
+  const rewardAccount = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    totalReward: rewardAccount.amount.toString(),
+    points: bnToBigInt(stakeAccountData.points).toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+  };
+}
+
+/**
+ * Security suite: 07_overflow. accrue() computes points += amount * elapsed * reward_rate
+ * entirely in u128 with checked_* math (see state.rs), and pool.total_staked /
+ * stake_account.amount updates use checked_add/checked_sub on u64. These scenarios prove that
+ * arithmetic which would overflow rejects cleanly with MathOverflow — never wraps — and that the
+ * u128 intermediate genuinely has headroom past what u64 alone could hold.
+ */
+const U64_MAX = 18_446_744_073_709_551_615n;
+
+async function scenarioSecurityOverflowA() {
+  const ctx = startSvm();
+  const admin = Keypair.generate();
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: admin.publicKey });
+  const [pool, poolBump] = pdas.poolPda(ctx.program.programId, stakeMint);
+  const rewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, rewardMint, { mintAuthority: pool });
+
+  // A large but entirely plausible staked amount (1e18, well within u64 range) combined with a
+  // reward_rate at the extreme end of u64 (u64::MAX) — realistic inputs a misconfigured or
+  // malicious pool admin could set, not a contrived value.
+  const EXTREME_RATE = U64_MAX;
+  const LARGE_AMOUNT = 1_000_000_000_000_000_000n; // 1e18
+
+  seedPoolAccount(ctx, pool, {
+    admin: admin.publicKey,
+    stakeMint,
+    rewardMint,
+    rewardRate: EXTREME_RATE,
+    totalStaked: LARGE_AMOUNT,
+    bump: poolBump,
+  });
+  const vault = pdas.vaultAta(stakeMint, pool);
+  seedTokenAccount(ctx, vault, { mint: stakeMint, owner: pool, amount: LARGE_AMOUNT });
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: LARGE_AMOUNT,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  // A long elapsed period (over a year) — combined with the amount and rate above, the true
+  // product (1e18 * ~31_536_000 * ~1.8e19) is many orders of magnitude past u128::MAX.
+  warpBySeconds(ctx.svm, 31_536_000);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await claimAs(ctx, pool, rewardMint, user);
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    // accrue()'s checked_mul chain fails before self.points or self.last_update_ts are ever
+    // written, so both must be exactly as seeded.
+    points: bnToBigInt(stakeAccountData.points).toString(),
+    lastUpdateTs: stakeAccountData.lastUpdateTs.toNumber(),
+    vaultAmount: vaultAccount.amount.toString(),
+    // u64 fields at this magnitude hit the same BN.toString() bug bnToBigInt's doc comment
+    // describes for u128 — read the raw bytes (8-byte width) instead.
+    totalStaked: bnToBigInt(poolData.totalStaked, 8).toString(),
+    stakeAmount: bnToBigInt(stakeAccountData.amount, 8).toString(),
+  };
+}
+
+async function scenarioSecurityOverflowB() {
+  const ctx = startSvm();
+  const admin = Keypair.generate();
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: admin.publicKey });
+  const [pool, poolBump] = pdas.poolPda(ctx.program.programId, stakeMint);
+  const rewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, rewardMint, { mintAuthority: pool });
+
+  // pool.total_staked (our own bookkeeping u64) is rigged to sit 500 short of u64::MAX, but the
+  // vault's *real* SPL token balance is kept small with headroom. This is a deliberately
+  // inconsistent precondition — reachable in principle only via a bug elsewhere, not through
+  // legitimate stake()/unstake() calls — constructed purely to isolate handle_stake's own
+  // `pool.total_staked.checked_add` from SPL Token's own, separate internal-balance overflow
+  // check (u64::MAX - 500 as a *real* token balance would trip the token program's own overflow
+  // guard on the transfer CPI before our program's checked_add ever runs, testing the wrong
+  // thing entirely).
+  const nearMaxTotalStaked = U64_MAX - 500n;
+  const realVaultBalance = 10_000;
+  seedPoolAccount(ctx, pool, {
+    admin: admin.publicKey,
+    stakeMint,
+    rewardMint,
+    rewardRate: 7,
+    totalStaked: nearMaxTotalStaked,
+    bump: poolBump,
+  });
+  const vault = pdas.vaultAta(stakeMint, pool);
+  seedTokenAccount(ctx, vault, { mint: stakeMint, owner: pool, amount: realVaultBalance });
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const userAta = pdas.vaultAta(stakeMint, user.publicKey);
+  const attemptedStake = 1_000;
+  seedTokenAccount(ctx, userAta, { mint: stakeMint, owner: user.publicKey, amount: attemptedStake });
+
+  // stake_account.amount (0 -> 1_000) does not overflow; only pool.total_staked, already 500
+  // short of u64::MAX, does — isolating the checked_add under test from the other one in the
+  // same handler.
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await stakeAs(ctx, pool, vault, user, userAta, attemptedStake);
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const [newStakeAccount] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  // anchor-litesvm's connection shim throws "Could not find <pubkey>" for a missing account
+  // instead of returning null like a real Connection — treat that throw as "does not exist".
+  let newStakeAccountExists: boolean;
+  try {
+    await ctx.provider.connection.getAccountInfo(newStakeAccount);
+    newStakeAccountExists = true;
+  } catch {
+    newStakeAccountExists = false;
+  }
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    // The whole transaction (including the token transfer and init_if_needed account creation)
+    // must have rolled back atomically: the new user's stake_account was never actually created,
+    // and neither the vault's real balance nor pool.total_staked moved at all.
+    newStakeAccountExists,
+    vaultAmount: vaultAccount.amount.toString(),
+    // u64 fields at this magnitude hit the same BN.toString() bug bnToBigInt's doc comment
+    // describes for u128 — read the raw bytes (8-byte width) instead.
+    totalStaked: bnToBigInt(poolData.totalStaked, 8).toString(),
+  };
+}
+
+async function scenarioSecurityOverflowC() {
+  const ctx = startSvm();
+  // amount * elapsed alone (5e9 * 5e9 = 2.5e19) already exceeds u64::MAX (~1.8446744e19) — if
+  // accrue()'s intermediate math were ever done in u64 instead of u128, this would silently wrap
+  // or panic. Computed in u128 all the way through, it fits comfortably (u128::MAX ~3.4e38).
+  const AMOUNT = 5_000_000_000n;
+  const ELAPSED = 5_000_000_000;
+  const { pool, rewardMint, vault } = await seedPool(ctx, Number(AMOUNT), 1, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: AMOUNT,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  warpBySeconds(ctx.svm, ELAPSED);
+
+  const { userRewardAta } = await claimAs(ctx, pool, rewardMint, user);
+
+  const rewardAccount = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    reward: rewardAccount.amount.toString(),
+    points: bnToBigInt(stakeAccountData.points).toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+  };
+}
+
 const scenarios: Record<string, () => Promise<unknown>> = {
   "stake-a": scenarioStakeA,
   "stake-b": scenarioStakeB,
@@ -1510,6 +1945,15 @@ const scenarios: Record<string, () => Promise<unknown>> = {
   "security-reinit-a": scenarioSecurityReinitA,
   "security-reinit-b": scenarioSecurityReinitB,
   "security-reinit-c": scenarioSecurityReinitC,
+  "security-double-claim-a": scenarioSecurityDoubleClaimA,
+  "security-double-claim-b": scenarioSecurityDoubleClaimB,
+  "security-double-claim-c": scenarioSecurityDoubleClaimC,
+  "security-double-claim-d": scenarioSecurityDoubleClaimD,
+  "security-double-claim-e-small": scenarioSecurityDoubleClaimESmall,
+  "security-double-claim-e-large": scenarioSecurityDoubleClaimELarge,
+  "security-overflow-a": scenarioSecurityOverflowA,
+  "security-overflow-b": scenarioSecurityOverflowB,
+  "security-overflow-c": scenarioSecurityOverflowC,
 };
 
 async function main() {

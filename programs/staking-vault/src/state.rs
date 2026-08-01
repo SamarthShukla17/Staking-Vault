@@ -84,6 +84,33 @@ mod tests {
     }
 
     #[test]
+    fn accrue_with_zero_elapsed_adds_zero() {
+        let mut acc = account(500, 100, 20);
+        acc.accrue(7, 20).unwrap();
+        assert_eq!(acc.points, 100);
+        assert_eq!(acc.last_update_ts, 20);
+    }
+
+    #[test]
+    fn accrue_with_zero_rate_adds_zero() {
+        let mut acc = account(500, 100, 0);
+        acc.accrue(0, 50).unwrap();
+        assert_eq!(acc.points, 100);
+        assert_eq!(acc.last_update_ts, 50);
+    }
+
+    #[test]
+    fn accrue_succeeds_at_the_largest_representable_product() {
+        // u64::MAX * 1 * u64::MAX is the largest product two u64 factors (amount, rate) can ever
+        // produce, and it still fits under u128::MAX (u64::MAX^2 = 2^128 - 2^65 + 1 < 2^128 - 1)
+        // — proving the u128 intermediate has headroom for the true worst case, not just typical
+        // values.
+        let mut acc = account(u64::MAX, 0, 0);
+        acc.accrue(u64::MAX, 1).unwrap();
+        assert_eq!(acc.points, (u64::MAX as u128) * (u64::MAX as u128));
+    }
+
+    #[test]
     fn pending_with_max_values_does_not_panic() {
         let acc = account(u64::MAX, 0, 0);
         let result = acc.pending(u64::MAX, i64::MAX);
@@ -102,5 +129,27 @@ mod tests {
         let mut acc = account(100, 0, 10);
         let err = acc.accrue(5, 5).unwrap_err();
         assert!(err.to_string().contains("Clock went backwards"));
+    }
+
+    #[test]
+    fn workspace_release_profile_has_overflow_checks_enabled() {
+        // accrue()'s checked_* calls are the primary defense against silent wraparound, but
+        // `overflow-checks = true` on [profile.release] is the backstop for any arithmetic
+        // elsewhere in the crate (including dependencies) that isn't already checked_*. Parsed
+        // as plain text rather than pulling in a TOML crate just for this one assertion.
+        let workspace_cargo_toml = include_str!("../../../Cargo.toml");
+        let release_start = workspace_cargo_toml
+            .find("[profile.release]")
+            .expect("workspace Cargo.toml must have a [profile.release] section");
+        let after = &workspace_cargo_toml[release_start..];
+        let release_section_end = after[1..].find('[').map(|i| i + 1).unwrap_or(after.len());
+        let release_section = &after[..release_section_end];
+
+        assert!(
+            release_section
+                .lines()
+                .any(|line| line.trim() == "overflow-checks = true"),
+            "[profile.release] must set `overflow-checks = true`, got:\n{release_section}"
+        );
     }
 }
