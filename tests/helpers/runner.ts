@@ -28,7 +28,7 @@
  * transactions; everything else is seeded state.
  */
 import { BN } from "@coral-xyz/anchor";
-import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { getAccount, getMint } from "@solana/spl-token";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -41,9 +41,14 @@ import {
   seedPoolAccount,
   seedStakeAccount,
   seedTokenAccount,
+  createAtaAndMint,
+  createMint,
   startSvm,
   warpBySeconds,
 } from "./setup";
+import { StakingVaultClient } from "../../packages/sdk/src/client";
+import { pendingPoints, claimableRewards, SCALE as SDK_SCALE } from "../../packages/sdk/src/math";
+import { associatedTokenAddress as sdkAssociatedTokenAddress } from "../../packages/sdk/src/pda";
 
 const REWARD_RATE = 7;
 
@@ -2142,6 +2147,139 @@ async function scenarioSecuritySignerOwnerMismatchE() {
 }
 
 /**
+ * Cases (a)/(b) above prove the Anchor TS *client* refuses to even build/send a transaction
+ * that's missing a required signer — a real defense, but one that a caller bypassing the SDK
+ * entirely (e.g. a hand-rolled RPC call) would never hit. These two scenarios instead build the
+ * raw TransactionInstruction directly and tamper with its compiled AccountMeta before sending,
+ * so the client-side guard never fires — the only thing left standing is the *on-chain program's*
+ * own `Signer<'info>` check, which reads the runtime AccountInfo.is_signer bit that the tampered
+ * meta actually controls.
+ */
+async function scenarioSecuritySignerRawMetaUnstakeF() {
+  const ctx = startSvm();
+  const stakedAmount = 1_000;
+  const { stakeMint, pool, vault } = await seedPool(ctx, stakedAmount);
+
+  const victim = Keypair.generate();
+  const [victimStakeAccount, victimBump] = pdas.stakePda(ctx.program.programId, pool, victim.publicKey);
+  seedStakeAccount(ctx, victimStakeAccount, {
+    owner: victim.publicKey,
+    amount: stakedAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: victimBump,
+  });
+  const victimAta = pdas.vaultAta(stakeMint, victim.publicKey);
+  seedTokenAccount(ctx, victimAta, { mint: stakeMint, owner: victim.publicKey, amount: 0 });
+
+  // Build the real instruction with every pubkey correct (including victim as `user`), then flip
+  // the compiled AccountMeta's isSigner flag to false. Because a pubkey's signer status in a
+  // Solana transaction is a property of the *message* (which account keys sit in the signer
+  // prefix), not of the IDL, this single mutation removes victim from the set of signatures the
+  // transaction requires at all — the client-side "missing signer" guard that cases (a)/(b) hit
+  // never gets a chance to fire.
+  const ix = await ctx.program.methods
+    .unstake(new BN(stakedAmount))
+    .accountsStrict({
+      user: victim.publicKey,
+      pool,
+      stakeAccount: victimStakeAccount,
+      userStakeAta: victimAta,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .instruction();
+
+  const userMeta = ix.keys.find((k) => k.pubkey.equals(victim.publicKey));
+  if (!userMeta) throw new Error("expected to find victim's pubkey in the compiled instruction's keys");
+  userMeta.isSigner = false;
+
+  const tx = new Transaction().add(ix);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    // No extra signers at all: only the provider's own wallet signs, as fee payer. Nobody signs
+    // for victim — and nobody needs to, since the tampered meta no longer asks for it.
+    await ctx.provider.sendAndConfirm!(tx, []);
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(victimStakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    victimAmount: stakeAccountData.amount.toNumber(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+async function scenarioSecuritySignerRawMetaInitG() {
+  const ctx = startSvm();
+  const targetAdmin = Keypair.generate();
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: targetAdmin.publicKey });
+  const rewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, rewardMint, { mintAuthority: targetAdmin.publicKey });
+  const [pool] = pdas.poolPda(ctx.program.programId, stakeMint);
+  const vault = pdas.vaultAta(stakeMint, pool);
+
+  // Same technique as scenarioSecuritySignerRawMetaUnstakeF, applied to initialize_pool's
+  // `admin` field: build the real instruction, then flip the compiled meta's isSigner flag to
+  // false so the client's own "missing signer" guard (already proven separately in case (c))
+  // never gets a chance to fire — only the on-chain program's `Signer<'info>` check on `admin`
+  // is left standing. `admin` is the very first field in the Accounts struct, so this failure
+  // happens before the `init` constraints on `pool`/`vault` (and their payer=admin requirement)
+  // are ever reached.
+  const ix = await ctx.program.methods
+    .initializePool(new BN(7))
+    .accountsStrict({
+      admin: targetAdmin.publicKey,
+      pool,
+      stakeMint,
+      rewardMint,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .instruction();
+
+  const adminMeta = ix.keys.find((k) => k.pubkey.equals(targetAdmin.publicKey));
+  if (!adminMeta) throw new Error("expected to find admin's pubkey in the compiled instruction's keys");
+  adminMeta.isSigner = false;
+
+  const tx = new Transaction().add(ix);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    // No extra signers: only the provider's own wallet signs, as fee payer. Nobody signs for
+    // targetAdmin — and nobody needs to, since the tampered meta no longer asks for it.
+    await ctx.provider.sendAndConfirm!(tx, []);
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  let poolExists: boolean;
+  try {
+    await ctx.provider.connection.getAccountInfo(pool);
+    poolExists = true;
+  } catch {
+    poolExists = false;
+  }
+
+  return { failed, errorInfo, poolExists };
+}
+
+/**
  * Security suite: 09_rounding. The bulk of this suite is a pure-arithmetic property test (see
  * tests/security/09_rounding.test.ts) that doesn't touch LiteSVM at all — suite 06's case (e)
  * already proved the real on-chain claim() matches this exact floor+remainder-carry model for a
@@ -2410,6 +2548,97 @@ async function scenarioInitializePoolZeroRateC() {
   };
 }
 
+/**
+ * SDK full-lifecycle scenario (see packages/sdk/tests/sdk.test.ts): exercises
+ * StakingVaultClient's public API — initializePool, stake, getClaimable, claim, unstake — against
+ * a real LiteSVM instance, and cross-checks the SDK's pure math.ts against the actual on-chain
+ * results at two points (the projected claimable reward, and the exact stored `points` after a
+ * later "touch"). Run via runScenario/this subprocess model (rather than directly in the SDK's
+ * own mocha process) for the same reason as everywhere else in this file: the native litesvm
+ * addon's cleanup-on-exit crashes intermittently, and a short-lived subprocess that force-exits
+ * via `process.exit(0)` right after printing its JSON result sidesteps that entirely.
+ */
+async function scenarioSdkFullLifecycle() {
+  const ctx = startSvm();
+  const admin = ctx.provider.wallet.payer;
+  const SDK_REWARD_RATE = 1_000_000_000n;
+  const SDK_STAKE_AMOUNT = 999n;
+
+  const client = new StakingVaultClient(ctx.provider);
+
+  // Mints are created as real transactions (not seeded bytes) since this scenario drives
+  // everything through the SDK's own client, matching how a real caller would use it.
+  const stakeMintPk = await createMint(ctx, 6, admin.publicKey);
+  const rewardMintPk = await createMint(ctx, 6, admin.publicKey);
+  await createAtaAndMint(ctx, stakeMintPk, admin.publicKey, 1_000_000);
+
+  await client.initializePool(stakeMintPk, rewardMintPk, SDK_REWARD_RATE);
+  const poolAfterInit = await client.getPool(stakeMintPk);
+
+  await client.stake(stakeMintPk, SDK_STAKE_AMOUNT);
+  const stakeAfterStake = await client.getStakeAccount(stakeMintPk, admin.publicKey);
+
+  warpBySeconds(ctx.svm, 57);
+  const nowAtClaim = ctx.svm.getClock().unixTimestamp as bigint;
+
+  const expectedPointsAtClaim = pendingPoints({
+    amount: stakeAfterStake!.amount,
+    points: stakeAfterStake!.points,
+    lastUpdateTs: stakeAfterStake!.lastUpdateTs,
+    rewardRate: SDK_REWARD_RATE,
+    nowTs: nowAtClaim,
+  });
+  const expectedClaimable = claimableRewards({
+    amount: stakeAfterStake!.amount,
+    points: stakeAfterStake!.points,
+    lastUpdateTs: stakeAfterStake!.lastUpdateTs,
+    rewardRate: SDK_REWARD_RATE,
+    nowTs: nowAtClaim,
+  });
+  const projectedClaimable = await client.getClaimable(stakeMintPk, admin.publicKey, nowAtClaim);
+
+  await client.claim(stakeMintPk);
+  const [rewardAta] = sdkAssociatedTokenAddress(rewardMintPk, admin.publicKey);
+  const rewardAccount = await getAccount(ctx.provider.connection, rewardAta);
+  const stakeAfterClaim = await client.getStakeAccount(stakeMintPk, admin.publicKey);
+
+  warpBySeconds(ctx.svm, 13);
+  const nowAtUnstake = ctx.svm.getClock().unixTimestamp as bigint;
+  const expectedPointsAtUnstake = pendingPoints({
+    amount: stakeAfterClaim!.amount,
+    points: stakeAfterClaim!.points,
+    lastUpdateTs: stakeAfterClaim!.lastUpdateTs,
+    rewardRate: SDK_REWARD_RATE,
+    nowTs: nowAtUnstake,
+  });
+
+  const UNSTAKE_AMOUNT = 400n;
+  await client.unstake(stakeMintPk, UNSTAKE_AMOUNT);
+  const stakeAfterUnstake = await client.getStakeAccount(stakeMintPk, admin.publicKey);
+  const poolAfterUnstake = await client.getPool(stakeMintPk);
+
+  return {
+    programIdMatches: client.programId.toBase58() === ctx.program.programId.toBase58(),
+    poolRewardRateAfterInit: poolAfterInit!.rewardRate.toString(),
+    poolTotalStakedAfterInit: poolAfterInit!.totalStaked.toString(),
+    stakeAmountAfterStake: stakeAfterStake!.amount.toString(),
+    stakePointsAfterStake: stakeAfterStake!.points.toString(),
+    expectedPointsAtClaim: expectedPointsAtClaim.toString(),
+    expectedPointsAtClaimRemainder: (expectedPointsAtClaim % SDK_SCALE).toString(),
+    expectedClaimable: expectedClaimable.toString(),
+    projectedClaimable: projectedClaimable.toString(),
+    actualRewardMinted: rewardAccount.amount.toString(),
+    stakePointsAfterClaim: stakeAfterClaim!.points.toString(),
+    stakeLastUpdateTsAfterClaim: stakeAfterClaim!.lastUpdateTs.toString(),
+    expectedPointsAtUnstake: expectedPointsAtUnstake.toString(),
+    stakePointsAfterUnstake: stakeAfterUnstake!.points.toString(),
+    stakeAmountAfterUnstake: stakeAfterUnstake!.amount.toString(),
+    stakeLastUpdateTsAfterUnstake: stakeAfterUnstake!.lastUpdateTs.toString(),
+    poolTotalStakedAfterUnstake: poolAfterUnstake!.totalStaked.toString(),
+    expectedAmountAfterUnstake: (SDK_STAKE_AMOUNT - UNSTAKE_AMOUNT).toString(),
+  };
+}
+
 const scenarios: Record<string, () => Promise<unknown>> = {
   "stake-a": scenarioStakeA,
   "stake-b": scenarioStakeB,
@@ -2451,11 +2680,14 @@ const scenarios: Record<string, () => Promise<unknown>> = {
   "security-signer-claim-b": scenarioSecuritySignerClaimB,
   "security-signer-init-c": scenarioSecuritySignerInitC,
   "security-signer-owner-mismatch-e": scenarioSecuritySignerOwnerMismatchE,
+  "security-signer-raw-meta-unstake-f": scenarioSecuritySignerRawMetaUnstakeF,
+  "security-signer-raw-meta-init-g": scenarioSecuritySignerRawMetaInitG,
   "security-rounding-dust": scenarioSecurityRoundingDust,
   "security-rounding-accumulate-then-pay": scenarioSecurityRoundingAccumulateThenPay,
   "initialize-pool-a": scenarioInitializePoolA,
   "initialize-pool-wrong-mint-authority-b": scenarioInitializePoolWrongMintAuthorityB,
   "initialize-pool-zero-rate-c": scenarioInitializePoolZeroRateC,
+  "sdk-full-lifecycle": scenarioSdkFullLifecycle,
 };
 
 async function main() {

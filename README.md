@@ -40,6 +40,8 @@ anchor test
 
 ## Status
 
+_Devnet: not yet deployed — run `anchor deploy --provider.cluster devnet` then `yarn setup:devnet`; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)._
+
 # Chapter 1 - in progress.
 
  - Phase 1.1 Program core : Complete

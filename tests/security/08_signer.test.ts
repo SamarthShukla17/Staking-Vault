@@ -11,11 +11,14 @@ const IDL = require("../../target/idl/staking_vault.json");
  * runtime enforces again at signature-verification time. `unstake`/`claim` additionally check
  * `stake_account.owner == user.key()`, independent of the PDA seeds derivation. This suite
  * proves both layers actually fire, and that a corrupted `owner` field can't hide behind a
- * correctly-derived PDA address.
+ * correctly-derived PDA address. Cases (f)/(g) go a layer deeper: they build the raw instruction
+ * and tamper with its compiled AccountMeta directly, bypassing the Anchor TS client's own
+ * "missing signer" guard entirely, to prove the *on-chain program's* `Signer<'info>` check fires
+ * independently of the client-side protections cases (a)-(c) rely on.
  *
- * Cases A, B, C, and E run in their own subprocess (see runScenario / tests/helpers/runner.ts);
- * this mocha process never touches LiteSVM directly for those (see runner.ts's doc comment for
- * why). Case D reads the built IDL directly — no LiteSVM involved at all.
+ * Cases A, B, C, E, F, and G run in their own subprocess (see runScenario / tests/helpers/
+ * runner.ts); this mocha process never touches LiteSVM directly for those (see runner.ts's doc
+ * comment for why). Case D reads the built IDL directly — no LiteSVM involved at all.
  */
 describe("security: 08 signer", () => {
   it("(a) unstake with the victim's real pubkey/stake_account but only the attacker signing fails, victim untouched", () => {
@@ -125,5 +128,53 @@ describe("security: 08 signer", () => {
     expect(r.stakeAmount).to.equal(1_000);
     expect(r.vaultAmount).to.equal(String(r.totalStaked));
     expect(r.totalStaked).to.equal(r.stakeAmount);
+  });
+
+  it("(f) unstake with the user AccountMeta's isSigner tampered to false is rejected by the on-chain Signer check, not just the client", () => {
+    const res = runScenario<{
+      failed: boolean;
+      errorInfo?: { message: string; logs: string[]; anchorCode?: string };
+      victimAmount: number;
+      vaultAmount: string;
+      totalStaked: number;
+    }>("security-signer-raw-meta-unstake-f");
+
+    expect(res.ok, `scenario failed: ${JSON.stringify(res.error)}`).to.equal(true);
+    const r = res.result!;
+
+    // Unlike cases (a)/(b), the compiled instruction's meta was mutated so victim's pubkey is no
+    // longer flagged as a required signer at all — the Anchor TS client's own "missing signer"
+    // guard never fires, and the transaction is sent with only the fee payer's signature. The
+    // rejection here can only be coming from the on-chain program's `Signer<'info>` check on
+    // `user`, which reads the runtime AccountInfo.is_signer bit the tampered meta controls.
+    //
+    // This error comes back from a raw sendAndConfirm call rather than program.methods(...).rpc(),
+    // so it's never translated into a parsed AnchorError (errorInfo.anchorCode is undefined) —
+    // the on-chain error code only shows up in the raw program logs.
+    expect(r.failed, "expected the tampered-meta unstake to fail").to.equal(true);
+    const haystack = [r.errorInfo?.message, ...(r.errorInfo?.logs ?? [])].filter(Boolean).join("\n");
+    expect(haystack, `expected AccountNotSigner, got:\n${haystack}`).to.include("AccountNotSigner");
+
+    expect(r.victimAmount).to.equal(1_000);
+    expect(r.vaultAmount).to.equal(String(r.totalStaked));
+    expect(r.totalStaked).to.equal(r.victimAmount);
+  });
+
+  it("(g) initialize_pool with the admin AccountMeta's isSigner tampered to false is rejected by the on-chain Signer check", () => {
+    const res = runScenario<{
+      failed: boolean;
+      errorInfo?: { message: string; logs: string[]; anchorCode?: string };
+      poolExists: boolean;
+    }>("security-signer-raw-meta-init-g");
+
+    expect(res.ok, `scenario failed: ${JSON.stringify(res.error)}`).to.equal(true);
+    const r = res.result!;
+
+    expect(r.failed, "expected the tampered-meta initialize_pool to fail").to.equal(true);
+    // See case (f): a raw sendAndConfirm error isn't translated into a parsed AnchorError, so the
+    // code only shows up in the raw program logs, not errorInfo.anchorCode.
+    const haystack = [r.errorInfo?.message, ...(r.errorInfo?.logs ?? [])].filter(Boolean).join("\n");
+    expect(haystack, `expected AccountNotSigner, got:\n${haystack}`).to.include("AccountNotSigner");
+    expect(r.poolExists, "the pool account must never have been created").to.equal(false);
   });
 });

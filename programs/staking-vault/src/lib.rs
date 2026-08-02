@@ -12,7 +12,7 @@ pub use events::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("GFE7kH8mnvXeA6y2SEzh8E1kqtcfVsZpb1YwH2KbvSZ3");
+declare_id!("9B6L1cQvonknPTnG1vjAAqRaFqeziM2EPw9ENqXnbDc6");
 
 #[program]
 pub mod staking_vault {

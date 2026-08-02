@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "ignoreDeprecations": "6.0",
+    "types": ["mocha", "chai", "node"],
+    "typeRoots": ["../../node_modules/@types", "./node_modules/@types"],
+    "lib": ["es2020"],
+    "module": "commonjs",
+    "target": "es2020",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "rootDir": "../.."
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

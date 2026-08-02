@@ -6,7 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-staking_vault = "GFE7kH8mnvXeA6y2SEzh8E1kqtcfVsZpb1YwH2KbvSZ3"
+staking_vault = "9B6L1cQvonknPTnG1vjAAqRaFqeziM2EPw9ENqXnbDc6"
+
+[programs.devnet]
+staking_vault = "9B6L1cQvonknPTnG1vjAAqRaFqeziM2EPw9ENqXnbDc6"
 
 [provider]
 cluster = "localnet"
