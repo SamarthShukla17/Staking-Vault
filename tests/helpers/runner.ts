@@ -1917,6 +1917,499 @@ async function scenarioSecurityOverflowC() {
   };
 }
 
+/**
+ * Security suite: 08_signer. Every instruction's `user`/`admin` account is typed
+ * `Signer<'info>`, which the Anchor TS client enforces client-side (refusing to build a
+ * transaction unless it holds an actual matching Keypair for that pubkey) as well as the
+ * Solana runtime enforcing it at signature-verification time. `unstake`/`claim` additionally
+ * constrain `stake_account.owner == user.key()` independently of the PDA seeds derivation. These
+ * scenarios prove both layers actually fire, and that a stake_account's stored `owner` field
+ * can't be silently trusted just because its address landed on the right PDA.
+ */
+async function scenarioSecuritySignerUnstakeA() {
+  const ctx = startSvm();
+  const stakedAmount = 1_000;
+  const { stakeMint, pool, vault } = await seedPool(ctx, stakedAmount);
+
+  const victim = Keypair.generate();
+  const [victimStakeAccount, victimBump] = pdas.stakePda(ctx.program.programId, pool, victim.publicKey);
+  seedStakeAccount(ctx, victimStakeAccount, {
+    owner: victim.publicKey,
+    amount: stakedAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: victimBump,
+  });
+
+  const attacker = Keypair.generate();
+  airdrop(ctx.svm, attacker.publicKey);
+  const attackerAta = pdas.vaultAta(stakeMint, attacker.publicKey);
+  seedTokenAccount(ctx, attackerAta, { mint: stakeMint, owner: attacker.publicKey, amount: 0 });
+
+  let failed = false;
+  let errorMessage = "";
+  try {
+    // `user` is genuinely the victim's own pubkey (so seeds/owner constraints line up
+    // perfectly), but only the attacker signs — there is no valid signature for the victim's
+    // key anywhere in this transaction.
+    await ctx.program.methods
+      .unstake(new BN(stakedAmount))
+      .accountsStrict({
+        user: victim.publicKey,
+        pool,
+        stakeAccount: victimStakeAccount,
+        userStakeAta: attackerAta,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([attacker])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorMessage = String((err as { message?: string })?.message ?? err);
+  }
+
+  const victimStakeData = await ctx.program.account.stakeAccount.fetch(victimStakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorMessage,
+    victimAmount: victimStakeData.amount.toNumber(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+async function scenarioSecuritySignerClaimB() {
+  const ctx = startSvm();
+  const { pool, rewardMint, vault } = await seedPool(ctx, CLAIM_AMOUNT, CLAIM_REWARD_RATE, true);
+
+  const victim = Keypair.generate();
+  const [victimStakeAccount, victimBump] = pdas.stakePda(ctx.program.programId, pool, victim.publicKey);
+  seedStakeAccount(ctx, victimStakeAccount, {
+    owner: victim.publicKey,
+    amount: CLAIM_AMOUNT,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: victimBump,
+  });
+  // Real, meaningful accrued progress the victim hasn't claimed yet, so "nothing minted" is a
+  // genuine assertion rather than a trivial 0 == 0.
+  warpBySeconds(ctx.svm, 1500);
+
+  const attacker = Keypair.generate();
+  airdrop(ctx.svm, attacker.publicKey);
+  const attackerRewardAta = pdas.vaultAta(rewardMint, attacker.publicKey);
+
+  let failed = false;
+  let errorMessage = "";
+  try {
+    // Same shape as case A: `user` is the victim's real pubkey, stake_account is the victim's
+    // real position, reward destination is the attacker's own ATA — but only the attacker signs.
+    await ctx.program.methods
+      .claim()
+      .accountsStrict({
+        user: victim.publicKey,
+        pool,
+        stakeAccount: victimStakeAccount,
+        rewardMint,
+        userRewardAta: attackerRewardAta,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([attacker])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorMessage = String((err as { message?: string })?.message ?? err);
+  }
+
+  const victimStakeData = await ctx.program.account.stakeAccount.fetch(victimStakeAccount);
+  const rewardMintInfo = await getMint(ctx.provider.connection, rewardMint);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorMessage,
+    // The transaction never reached the program at all (rejected client-side before send), so
+    // accrue() never ran: points are still exactly as seeded, not partially advanced.
+    victimPoints: bnToBigInt(victimStakeData.points).toString(),
+    rewardSupply: rewardMintInfo.supply.toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: victimStakeData.amount.toNumber(),
+  };
+}
+
+async function scenarioSecuritySignerInitC() {
+  const ctx = startSvm();
+  const targetAdmin = Keypair.generate();
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: targetAdmin.publicKey });
+  const rewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, rewardMint, { mintAuthority: targetAdmin.publicKey });
+  const [pool] = pdas.poolPda(ctx.program.programId, stakeMint);
+  const vault = pdas.vaultAta(stakeMint, pool);
+
+  let failed = false;
+  let errorMessage = "";
+  try {
+    // No `.signers([...])` at all: nobody signs as the declared `admin`, only the provider's
+    // default wallet is attached as fee payer.
+    await ctx.program.methods
+      .initializePool(new BN(7))
+      .accountsStrict({
+        admin: targetAdmin.publicKey,
+        pool,
+        stakeMint,
+        rewardMint,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorMessage = String((err as { message?: string })?.message ?? err);
+  }
+
+  // anchor-litesvm's connection shim throws "Could not find <pubkey>" for a missing account
+  // instead of returning null like a real Connection — treat that throw as "does not exist".
+  let poolExists: boolean;
+  try {
+    await ctx.provider.connection.getAccountInfo(pool);
+    poolExists = true;
+  } catch {
+    poolExists = false;
+  }
+
+  return { failed, errorMessage, poolExists };
+}
+
+async function scenarioSecuritySignerOwnerMismatchE() {
+  const ctx = startSvm();
+  const stakedAmount = 1_000;
+  const { stakeMint, pool, vault } = await seedPool(ctx, stakedAmount);
+
+  const realUser = Keypair.generate();
+  airdrop(ctx.svm, realUser.publicKey);
+  const userAta = pdas.vaultAta(stakeMint, realUser.publicKey);
+  seedTokenAccount(ctx, userAta, { mint: stakeMint, owner: realUser.publicKey, amount: 0 });
+
+  // The PDA address is correctly derived from realUser's own pubkey (seeds/bump match exactly —
+  // this is NOT a seeds/address substitution attack), but the account's stored `owner` field is
+  // a different, unrelated pubkey — simulating data corruption or a hypothetical bug elsewhere
+  // that could leave the two out of sync. `constraint = stake_account.owner == user.key()` must
+  // catch this independently of the seeds derivation having already succeeded.
+  const impostorOwner = Keypair.generate().publicKey;
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, realUser.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: impostorOwner,
+    amount: stakedAmount,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await unstakeAs(ctx, pool, vault, realUser, userAta, stakedAmount);
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    failed,
+    errorInfo,
+    storedOwner: stakeAccountData.owner.toBase58(),
+    impostorOwner: impostorOwner.toBase58(),
+    realUser: realUser.publicKey.toBase58(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+  };
+}
+
+/**
+ * Security suite: 09_rounding. The bulk of this suite is a pure-arithmetic property test (see
+ * tests/security/09_rounding.test.ts) that doesn't touch LiteSVM at all — suite 06's case (e)
+ * already proved the real on-chain claim() matches this exact floor+remainder-carry model for a
+ * representative case. These two scenarios cover the on-chain edge cases the property model
+ * can't: a real dust-sized position, and a real remainder that crosses the SCALE threshold after
+ * being carried through prior (seeded) claims.
+ */
+async function scenarioSecurityRoundingDust() {
+  const ctx = startSvm();
+  const AMOUNT = 1;
+  const RATE = 1;
+  const ELAPSED = 100;
+  const { pool, rewardMint, vault } = await seedPool(ctx, AMOUNT, RATE, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: AMOUNT,
+    points: 0,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  // points = 1 * 100 * 1 = 100 — far below SCALE (1e12), so this must mint 0 and simply retain
+  // the 100 points as a genuine, un-rounded-up remainder.
+  warpBySeconds(ctx.svm, ELAPSED);
+
+  const { userRewardAta } = await claimAs(ctx, pool, rewardMint, user);
+
+  const rewardAccount = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAccountData = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    reward: rewardAccount.amount.toString(),
+    points: bnToBigInt(stakeAccountData.points).toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: stakeAccountData.amount.toNumber(),
+  };
+}
+
+async function scenarioSecurityRoundingAccumulateThenPay() {
+  const ctx = startSvm();
+  const AMOUNT = 1_000;
+  const RATE = 1;
+  const { pool, rewardMint, vault } = await seedPool(ctx, AMOUNT, RATE, true);
+
+  const user = Keypair.generate();
+  airdrop(ctx.svm, user.publicKey);
+  const [stakeAccount, stakeBump] = pdas.stakePda(ctx.program.programId, pool, user.publicKey);
+  // Seeded to represent the state left behind by many prior tiny claims, each of which
+  // individually rounded to 0 but together carried a genuine sub-SCALE remainder just short of a
+  // whole token — exactly what points %= SCALE (never zeroed) is meant to preserve.
+  const PREEXISTING_REMAINDER = 999_999_999_999n;
+  seedStakeAccount(ctx, stakeAccount, {
+    owner: user.publicKey,
+    amount: AMOUNT,
+    points: PREEXISTING_REMAINDER,
+    lastUpdateTs: 0,
+    bump: stakeBump,
+  });
+
+  // One long wait: amount(1_000) * elapsed(1_000) * rate(1) = 1_000_000 new points, just enough
+  // to push the carried remainder over SCALE.
+  const ELAPSED = 1_000;
+  warpBySeconds(ctx.svm, ELAPSED);
+
+  const { userRewardAta } = await claimAs(ctx, pool, rewardMint, user);
+  const rewardAfterFirst = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAfterFirst = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+
+  // Immediate re-claim with zero further elapsed time must not pay out again — the remainder
+  // must have been credited exactly once, not double-counted. claim() takes no arguments, so an
+  // unexpired blockhash would make this second call an identical (duplicate) transaction.
+  ctx.svm.expireBlockhash();
+  await claimAs(ctx, pool, rewardMint, user);
+  const rewardAfterSecond = await getAccount(ctx.provider.connection, userRewardAta);
+  const stakeAfterSecond = await ctx.program.account.stakeAccount.fetch(stakeAccount);
+
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const poolData = await ctx.program.account.pool.fetch(pool);
+
+  return {
+    rewardAfterFirst: rewardAfterFirst.amount.toString(),
+    pointsAfterFirst: bnToBigInt(stakeAfterFirst.points).toString(),
+    rewardAfterSecond: rewardAfterSecond.amount.toString(),
+    pointsAfterSecond: bnToBigInt(stakeAfterSecond.points).toString(),
+    vaultAmount: vaultAccount.amount.toString(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    stakeAmount: stakeAfterSecond.amount.toNumber(),
+  };
+}
+
+/**
+ * initialize_pool. Covers the happy path (Pool fields, vault creation, and the reward mint's
+ * authority actually moving to the pool PDA) plus its two guards: the reward mint's current
+ * authority must be the signing admin (InvalidMintAuthority), and reward_rate must be nonzero
+ * (ZeroAmount).
+ */
+async function scenarioInitializePoolA() {
+  const ctx = startSvm();
+  const admin = Keypair.generate();
+  airdrop(ctx.svm, admin.publicKey);
+
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: admin.publicKey });
+  const rewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, rewardMint, { mintAuthority: admin.publicKey });
+
+  const [pool, poolBump] = pdas.poolPda(ctx.program.programId, stakeMint);
+  const vault = pdas.vaultAta(stakeMint, pool);
+
+  const rewardRate = 7;
+  await ctx.program.methods
+    .initializePool(new BN(rewardRate))
+    .accountsStrict({
+      admin: admin.publicKey,
+      pool,
+      stakeMint,
+      rewardMint,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([admin])
+    .rpc();
+
+  const poolData = await ctx.program.account.pool.fetch(pool);
+  const vaultAccount = await getAccount(ctx.provider.connection, vault);
+  const rewardMintInfo = await getMint(ctx.provider.connection, rewardMint);
+
+  return {
+    pool: pool.toBase58(),
+    admin: poolData.admin.toBase58(),
+    expectedAdmin: admin.publicKey.toBase58(),
+    stakeMint: poolData.stakeMint.toBase58(),
+    expectedStakeMint: stakeMint.toBase58(),
+    rewardMint: poolData.rewardMint.toBase58(),
+    expectedRewardMint: rewardMint.toBase58(),
+    rewardRate: poolData.rewardRate.toNumber(),
+    totalStaked: poolData.totalStaked.toNumber(),
+    bump: poolData.bump,
+    expectedBump: poolBump,
+    vaultAmount: vaultAccount.amount.toString(),
+    vaultMint: vaultAccount.mint.toBase58(),
+    vaultOwner: vaultAccount.owner.toBase58(),
+    rewardMintAuthority: rewardMintInfo.mintAuthority?.toBase58() ?? null,
+    expectedRewardMintAuthority: pool.toBase58(),
+  };
+}
+
+async function scenarioInitializePoolWrongMintAuthorityB() {
+  const ctx = startSvm();
+  const admin = Keypair.generate();
+  airdrop(ctx.svm, admin.publicKey);
+  const someoneElse = Keypair.generate();
+
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: admin.publicKey });
+  // reward_mint's real authority is someone other than the signing admin.
+  const rewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, rewardMint, { mintAuthority: someoneElse.publicKey });
+
+  const [pool] = pdas.poolPda(ctx.program.programId, stakeMint);
+  const vault = pdas.vaultAta(stakeMint, pool);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await ctx.program.methods
+      .initializePool(new BN(7))
+      .accountsStrict({
+        admin: admin.publicKey,
+        pool,
+        stakeMint,
+        rewardMint,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([admin])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  // anchor-litesvm's connection shim throws "Could not find <pubkey>" for a missing account
+  // instead of returning null like a real Connection — treat that throw as "does not exist".
+  let poolExists: boolean;
+  try {
+    await ctx.provider.connection.getAccountInfo(pool);
+    poolExists = true;
+  } catch {
+    poolExists = false;
+  }
+
+  const rewardMintInfo = await getMint(ctx.provider.connection, rewardMint);
+
+  return {
+    failed,
+    errorInfo,
+    poolExists,
+    rewardMintAuthorityUnchanged: rewardMintInfo.mintAuthority?.toBase58() === someoneElse.publicKey.toBase58(),
+  };
+}
+
+async function scenarioInitializePoolZeroRateC() {
+  const ctx = startSvm();
+  const admin = Keypair.generate();
+  airdrop(ctx.svm, admin.publicKey);
+
+  const stakeMint = Keypair.generate().publicKey;
+  seedMint(ctx, stakeMint, { mintAuthority: admin.publicKey });
+  const rewardMint = Keypair.generate().publicKey;
+  seedMint(ctx, rewardMint, { mintAuthority: admin.publicKey });
+
+  const [pool] = pdas.poolPda(ctx.program.programId, stakeMint);
+  const vault = pdas.vaultAta(stakeMint, pool);
+
+  let failed = false;
+  let errorInfo: ReturnType<typeof describeError> | undefined;
+  try {
+    await ctx.program.methods
+      .initializePool(new BN(0))
+      .accountsStrict({
+        admin: admin.publicKey,
+        pool,
+        stakeMint,
+        rewardMint,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([admin])
+      .rpc();
+  } catch (err) {
+    failed = true;
+    errorInfo = describeError(err);
+  }
+
+  let poolExists: boolean;
+  try {
+    await ctx.provider.connection.getAccountInfo(pool);
+    poolExists = true;
+  } catch {
+    poolExists = false;
+  }
+
+  // require!(reward_rate > 0, ...) fires before the set_authority CPI ever runs, so the reward
+  // mint's authority must still be the admin, untouched.
+  const rewardMintInfo = await getMint(ctx.provider.connection, rewardMint);
+
+  return {
+    failed,
+    errorInfo,
+    poolExists,
+    rewardMintAuthorityUnchanged: rewardMintInfo.mintAuthority?.toBase58() === admin.publicKey.toBase58(),
+  };
+}
+
 const scenarios: Record<string, () => Promise<unknown>> = {
   "stake-a": scenarioStakeA,
   "stake-b": scenarioStakeB,
@@ -1954,6 +2447,15 @@ const scenarios: Record<string, () => Promise<unknown>> = {
   "security-overflow-a": scenarioSecurityOverflowA,
   "security-overflow-b": scenarioSecurityOverflowB,
   "security-overflow-c": scenarioSecurityOverflowC,
+  "security-signer-unstake-a": scenarioSecuritySignerUnstakeA,
+  "security-signer-claim-b": scenarioSecuritySignerClaimB,
+  "security-signer-init-c": scenarioSecuritySignerInitC,
+  "security-signer-owner-mismatch-e": scenarioSecuritySignerOwnerMismatchE,
+  "security-rounding-dust": scenarioSecurityRoundingDust,
+  "security-rounding-accumulate-then-pay": scenarioSecurityRoundingAccumulateThenPay,
+  "initialize-pool-a": scenarioInitializePoolA,
+  "initialize-pool-wrong-mint-authority-b": scenarioInitializePoolWrongMintAuthorityB,
+  "initialize-pool-zero-rate-c": scenarioInitializePoolZeroRateC,
 };
 
 async function main() {

@@ -1,8 +1,11 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_option::COption;
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{Mint, Token, TokenAccount};
+use anchor_spl::token::spl_token::instruction::AuthorityType;
+use anchor_spl::token::{self, Mint, SetAuthority, Token, TokenAccount};
 
 use crate::constants::POOL_SEED;
+use crate::errors::ErrorCode;
 use crate::events::PoolInitialized;
 use crate::state::Pool;
 
@@ -21,6 +24,11 @@ pub struct InitializePool<'info> {
     pub pool: Account<'info, Pool>,
 
     pub stake_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        constraint = reward_mint.mint_authority == COption::Some(admin.key()) @ ErrorCode::InvalidMintAuthority,
+    )]
     pub reward_mint: Account<'info, Mint>,
 
     #[account(
@@ -37,19 +45,32 @@ pub struct InitializePool<'info> {
 }
 
 pub fn handle_initialize_pool(ctx: Context<InitializePool>, reward_rate: u64) -> Result<()> {
-    let pool = &mut ctx.accounts.pool;
-    pool.admin = ctx.accounts.admin.key();
-    pool.stake_mint = ctx.accounts.stake_mint.key();
-    pool.reward_mint = ctx.accounts.reward_mint.key();
-    pool.reward_rate = reward_rate;
-    pool.total_staked = 0;
-    pool.bump = ctx.bumps.pool;
+    require!(reward_rate > 0, ErrorCode::ZeroAmount);
+
+    ctx.accounts.pool.admin = ctx.accounts.admin.key();
+    ctx.accounts.pool.stake_mint = ctx.accounts.stake_mint.key();
+    ctx.accounts.pool.reward_mint = ctx.accounts.reward_mint.key();
+    ctx.accounts.pool.reward_rate = reward_rate;
+    ctx.accounts.pool.total_staked = 0;
+    ctx.accounts.pool.bump = ctx.bumps.pool;
+
+    let pool_key = ctx.accounts.pool.key();
+
+    // Move the reward mint's authority to the pool PDA so claim()'s mint_to CPI (signed by the
+    // pool) is authorized later. Only the admin — already verified above to be the current mint
+    // authority — can authorize this move.
+    let cpi_accounts = SetAuthority {
+        current_authority: ctx.accounts.admin.to_account_info(),
+        account_or_mint: ctx.accounts.reward_mint.to_account_info(),
+    };
+    let cpi_ctx = CpiContext::new(ctx.accounts.token_program.key(), cpi_accounts);
+    token::set_authority(cpi_ctx, AuthorityType::MintTokens, Some(pool_key))?;
 
     emit!(PoolInitialized {
-        pool: pool.key(),
-        stake_mint: pool.stake_mint,
-        reward_mint: pool.reward_mint,
-        reward_rate: pool.reward_rate,
+        pool: pool_key,
+        stake_mint: ctx.accounts.stake_mint.key(),
+        reward_mint: ctx.accounts.reward_mint.key(),
+        reward_rate,
     });
 
     Ok(())
