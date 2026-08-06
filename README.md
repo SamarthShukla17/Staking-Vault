@@ -123,7 +123,7 @@ yarn test:program                                                # 48 tests, ~30
 
 **Live on devnet:** [`9B6L1cQvonknPTnG1vjAAqRaFqeziM2EPw9ENqXnbDc6`](https://solana.fm/address/9B6L1cQvonknPTnG1vjAAqRaFqeziM2EPw9ENqXnbDc6?cluster=devnet-solana)
 
-# Chapter 1 - in progress.
+# Chapter 1 — Complete
 
  - Phase 1.1 Program core : Complete
  
@@ -143,7 +143,7 @@ yarn test:program                                                # 48 tests, ~30
            (Goal: points convert to minted rewards, floor division, remainder retained.)
 
 
- - Phase 1.2 Security suite - in progress
+ - Phase 1.2 Security suite : Complete
 
      - 1.6 — Threat 1: unstake more than staked
      - 1.7 — Threat 2: drain another user's stake
