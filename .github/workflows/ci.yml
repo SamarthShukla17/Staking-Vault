@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel a still-running run for the same ref when a newer push/PR update supersedes it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the versions in the README toolchain table — never "latest".
+  RUST_VERSION: "1.89.0"
+  SOLANA_VERSION: "3.1.10"
+  ANCHOR_VERSION: "1.1.2"
+  NODE_VERSION: "20.17.0"
+  YARN_VERSION: "1.22.22"
+
+jobs:
+  lint-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest ships rustup preinstalled, so the pinned toolchain is installed directly
+      # instead of pulling in a third-party toolchain action.
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_VERSION"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: programs/staking-vault
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --manifest-path programs/staking-vault/Cargo.toml -- -D warnings
+      - run: cargo test --manifest-path programs/staking-vault/Cargo.toml
+
+  build-test:
+    needs: lint-rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_VERSION"
+
+      # rust-cache also caches the Solana CLI install (via cache-directories, keyed on its
+      # pinned version below) — no separate cache action needed for that.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: programs/staking-vault
+          cache-directories: ~/.local/share/solana
+          key: solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install Solana CLI (pinned, official Anza installer)
+        run: |
+          if [ ! -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          fi
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      # Official prebuilt release binary rather than `cargo install`: anchor-cli 1.1.2's own
+      # published Cargo.lock pins a dependency requiring rustc >=1.91, which our pinned 1.89.0
+      # can't compile — this sidesteps that entirely and is faster besides. otter-sec/anchor is
+      # the project's current home (coral-xyz/anchor was transferred there).
+      - name: Install anchor-cli (pinned, official release binary)
+        run: |
+          curl -sSfL -o anchor \
+            "https://github.com/otter-sec/anchor/releases/download/v${ANCHOR_VERSION}/anchor-${ANCHOR_VERSION}-x86_64-unknown-linux-gnu"
+          chmod +x anchor
+          sudo mv anchor /usr/local/bin/anchor
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: yarn
+
+      - name: Install pinned yarn
+        run: npm install -g "yarn@$YARN_VERSION"
+
+      - run: anchor build
+      - run: yarn install --frozen-lockfile
+      - run: yarn test:program

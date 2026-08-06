@@ -1,5 +1,7 @@
 # staking-vault
 
+[![ci](https://github.com/SamarthShukla17/Staking-Vault/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SamarthShukla17/Staking-Vault/actions/workflows/ci.yml)
+
 An Anchor-based SPL staking vault program on Solana, with a TypeScript SDK, web app, and supporting services to follow.
 
 ## Toolchain

@@ -70,7 +70,11 @@ pub fn handle_unstake(ctx: Context<Unstake>, amount: u64) -> Result<()> {
         to: ctx.accounts.user_stake_ata.to_account_info(),
         authority: ctx.accounts.pool.to_account_info(),
     };
-    let cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.key(), cpi_accounts, signer_seeds_outer);
+    let cpi_ctx = CpiContext::new_with_signer(
+        ctx.accounts.token_program.key(),
+        cpi_accounts,
+        signer_seeds_outer,
+    );
     token::transfer(cpi_ctx, amount)?;
 
     ctx.accounts.stake_account.amount = ctx

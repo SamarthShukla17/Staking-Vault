@@ -38,7 +38,10 @@ impl StakeAccount {
             .and_then(|v| v.checked_mul(rate as u128))
             .ok_or(ErrorCode::MathOverflow)?;
 
-        self.points = self.points.checked_add(delta).ok_or(ErrorCode::MathOverflow)?;
+        self.points = self
+            .points
+            .checked_add(delta)
+            .ok_or(ErrorCode::MathOverflow)?;
         self.last_update_ts = now;
         Ok(())
     }

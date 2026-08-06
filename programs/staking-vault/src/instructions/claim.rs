@@ -57,7 +57,9 @@ pub fn handle_claim(ctx: Context<Claim>) -> Result<()> {
         return Ok(());
     }
 
-    let reward: u64 = reward_u128.try_into().map_err(|_| ErrorCode::MathOverflow)?;
+    let reward: u64 = reward_u128
+        .try_into()
+        .map_err(|_| ErrorCode::MathOverflow)?;
     // Keep the sub-SCALE remainder so no fractional progress is lost to the user across claims.
     ctx.accounts.stake_account.points %= SCALE;
 
@@ -71,7 +73,11 @@ pub fn handle_claim(ctx: Context<Claim>) -> Result<()> {
         to: ctx.accounts.user_reward_ata.to_account_info(),
         authority: ctx.accounts.pool.to_account_info(),
     };
-    let cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.key(), cpi_accounts, signer_seeds_outer);
+    let cpi_ctx = CpiContext::new_with_signer(
+        ctx.accounts.token_program.key(),
+        cpi_accounts,
+        signer_seeds_outer,
+    );
     token::mint_to(cpi_ctx, reward)?;
 
     emit!(Claimed {
