@@ -1,4 +1,4 @@
-name: ci
+name: CI
 
 on:
   push:
@@ -20,71 +20,67 @@ env:
   YARN_VERSION: "1.22.22"
 
 jobs:
-  lint-rust:
+  ci:
     runs-on: ubuntu-latest
+    # No continue-on-error / if-always anywhere below: a failing step stops the workflow.
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # ubuntu-latest ships rustup preinstalled, so the pinned toolchain is installed directly
-      # instead of pulling in a third-party toolchain action.
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
-          rustup default "$RUST_VERSION"
-
-      - uses: Swatinem/rust-cache@v2
+      - name: Install Rust (pinned)
+        uses: dtolnay/rust-toolchain@stable
         with:
-          workspaces: programs/staking-vault
-
-      - run: cargo fmt --all --check
-      - run: cargo clippy --manifest-path programs/staking-vault/Cargo.toml -- -D warnings
-      - run: cargo test --manifest-path programs/staking-vault/Cargo.toml
-
-  build-test:
-    needs: lint-rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
-          rustup default "$RUST_VERSION"
-
-      # rust-cache also caches the Solana CLI install (via cache-directories, keyed on its
-      # pinned version below) — no separate cache action needed for that.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: programs/staking-vault
-          cache-directories: ~/.local/share/solana
-          key: solana-${{ env.SOLANA_VERSION }}
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install Solana CLI (pinned, official Anza installer)
         run: |
-          if [ ! -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
-            sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
-          fi
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
-      # Official prebuilt release binary rather than `cargo install`: anchor-cli 1.1.2's own
-      # published Cargo.lock pins a dependency requiring rustc >=1.91, which our pinned 1.89.0
-      # can't compile — this sidesteps that entirely and is faster besides. otter-sec/anchor is
-      # the project's current home (coral-xyz/anchor was transferred there).
-      - name: Install anchor-cli (pinned, official release binary)
+      # Official prebuilt release binary rather than `avm install` / `cargo install`: anchor-cli
+      # 1.1.2's own published Cargo.lock pins a dependency requiring rustc >=1.91, which our
+      # pinned 1.89.0 can't compile — this sidesteps that entirely and is faster besides.
+      # otter-sec/anchor is the project's current home (coral-xyz/anchor was transferred there).
+      - name: Install Anchor CLI (pinned, official release binary)
         run: |
           curl -sSfL -o anchor \
             "https://github.com/otter-sec/anchor/releases/download/v${ANCHOR_VERSION}/anchor-${ANCHOR_VERSION}-x86_64-unknown-linux-gnu"
           chmod +x anchor
           sudo mv anchor /usr/local/bin/anchor
 
+      - name: Cache target/ and node_modules/
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            node_modules
+            packages/*/node_modules
+            apps/*/node_modules
+            services/*/node_modules
+          key: ${{ runner.os }}-cargo-yarn-${{ hashFiles('Cargo.lock', 'yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-yarn-
+
+      - name: anchor build
+        run: anchor build
+
+      - name: cargo test (program unit tests)
+        run: cargo test --manifest-path programs/staking-vault/Cargo.toml
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: yarn
 
       - name: Install pinned yarn
         run: npm install -g "yarn@$YARN_VERSION"
 
-      - run: anchor build
-      - run: yarn install --frozen-lockfile
-      - run: yarn test:program
+      # --frozen-lockfile: fails instead of silently rewriting yarn.lock if it's out of sync —
+      # the whole point of this workflow is proving the build is reproducible.
+      - name: yarn install
+        run: yarn install --frozen-lockfile
+
+      - name: yarn test:program (LiteSVM integration + security suite)
+        run: yarn test:program
+
+      - name: yarn workspace @staking-vault/sdk build
+        run: yarn workspace @staking-vault/sdk build
