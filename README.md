@@ -40,7 +40,7 @@ anchor test
 
 ## Status
 
-_Devnet: not yet deployed — run `anchor deploy --provider.cluster devnet` then `yarn setup:devnet`; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)._
+**Live on devnet:** [`9B6L1cQvonknPTnG1vjAAqRaFqeziM2EPw9ENqXnbDc6`](https://solana.fm/address/9B6L1cQvonknPTnG1vjAAqRaFqeziM2EPw9ENqXnbDc6?cluster=devnet-solana)
 
 # Chapter 1 - in progress.
 

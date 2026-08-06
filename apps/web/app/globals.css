@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", monospace;
+
+  --animate-shimmer: shimmer 2.2s linear infinite;
+  --animate-pulse-soft: pulse-soft 2.4s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: #000000;
+}
+
+body {
+  color: #e5e5e5;
+  overflow-x: hidden;
+}
+
+::selection {
+  background-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+/* Thin neutral scrollbar to match the theme instead of the default OS chrome. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  border: 2px solid #000;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.bg-shimmer {
+  background-image: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0.06) 30%,
+    rgba(255, 255, 255, 0.14) 45%,
+    rgba(255, 255, 255, 0.06) 60%
+  );
+  background-size: 200% 100%;
+}
+
+/* --- @solana/wallet-adapter-react-ui overrides: flat, monochrome, no gradients --- */
+
+/*
+ * @solana/wallet-adapter-react-ui's own stylesheet is imported inside a next/dynamic(ssr:false)
+ * chunk, so it's injected into <head> *after* this file — at equal specificity it would win the
+ * cascade on source order alone. `!important` (plus the compound `.wallet-adapter-button-
+ * trigger` selector for extra specificity) makes this override unconditional regardless of
+ * injection order.
+ */
+.wallet-adapter-button,
+.wallet-adapter-button.wallet-adapter-button-trigger {
+  background-color: #fff !important;
+  background-image: none !important;
+  color: #000 !important;
+  border-radius: 8px !important;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 0.875rem;
+  height: 40px !important;
+  padding: 0 16px !important;
+  box-shadow: none !important;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+.wallet-adapter-button:not([disabled]):hover {
+  background-color: #fff !important;
+  opacity: 0.85;
+  transform: none;
+}
+.wallet-adapter-button:not([disabled]):active {
+  transform: scale(0.98);
+}
+.wallet-adapter-button-start-icon {
+  margin-right: 8px !important;
+}
+
+.wallet-adapter-dropdown-list {
+  background: #0a0a0a !important;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px !important;
+  box-shadow: 0 20px 60px -12px rgba(0, 0, 0, 0.8);
+}
+.wallet-adapter-dropdown-list-item {
+  border-radius: 6px !important;
+  font-family: var(--font-sans);
+  background: transparent;
+  color: #e5e5e5;
+}
+.wallet-adapter-dropdown-list-item:not([disabled]):hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.wallet-adapter-modal-overlay {
+  background: rgba(0, 0, 0, 0.8) !important;
+}
+.wallet-adapter-modal-container {
+  font-family: var(--font-sans);
+}
+.wallet-adapter-modal-wrapper {
+  background: #0a0a0a !important;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px !important;
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.9);
+}
+.wallet-adapter-modal-title {
+  color: #f5f5f5 !important;
+  font-family: var(--font-sans);
+}
+.wallet-adapter-modal-list .wallet-adapter-button {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+  background-image: none !important;
+  color: #e5e5e5 !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+}
+.wallet-adapter-modal-list .wallet-adapter-button:hover {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+  opacity: 1;
+}
+.wallet-adapter-modal-button-close {
+  background: rgba(255, 255, 255, 0.08) !important;
+}

@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
-import { AnchorProvider, BN, Program, Wallet, type Provider } from "@coral-xyz/anchor";
-import { Connection, Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
+import { AnchorProvider, BN, Program, type Provider } from "@coral-xyz/anchor";
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction, VersionedTransaction } from "@solana/web3.js";
 
 import IDL from "./idl/staking_vault.json";
 import type { StakingVault } from "./idl/staking_vault_type";
@@ -9,6 +9,17 @@ import { PROGRAM_ID, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, associatedTo
 import type { PoolAccount, StakeAccountState } from "./types";
 
 const SYSVAR_CLOCK_PUBKEY = new PublicKey("SysvarC1ock11111111111111111111111111111111");
+
+/**
+ * The wallet shape `AnchorProvider` actually requires: `publicKey` + sign methods, nothing
+ * more. Derived from `AnchorProvider`'s own constructor rather than imported as `@coral-xyz/
+ * anchor`'s top-level `Wallet` export, which is a *different*, Node-only type (a concrete
+ * `NodeWallet` subclass requiring a real `payer: Keypair`) — importing that one as a runtime
+ * value breaks any bundler building this SDK for the browser, and even as a type it would
+ * wrongly reject browser wallet-adapter objects (which never carry a raw Keypair) from callers
+ * of this client's constructor.
+ */
+export type Wallet = ConstructorParameters<typeof AnchorProvider>[1];
 
 /** True for anything already shaped like an Anchor Provider (e.g. a test-harness LiteSVMProvider). */
 function isProviderLike(x: Connection | Provider): x is Provider {
@@ -22,6 +33,37 @@ function isProviderLike(x: Connection | Provider): x is Provider {
  */
 function bnToBigInt(bn: anchor.BN): bigint {
   return BigInt(`0x${bn.toString(16)}`);
+}
+
+function signOne<T extends Transaction | VersionedTransaction>(payer: Keypair, tx: T): T {
+  if (tx instanceof VersionedTransaction) {
+    tx.sign([payer]);
+  } else {
+    tx.partialSign(payer);
+  }
+  return tx;
+}
+
+/**
+ * A throwaway signer for read-only use (no wallet passed to the constructor): can only ever
+ * sign for its own freshly-generated Keypair, which nothing else references or funds, so any
+ * actual write call still fails as intended. Built by hand rather than via
+ * `@coral-xyz/anchor`'s `Wallet`/`NodeWallet` class, which is Node-only — its browser bundle
+ * doesn't export it at all, so importing it as a runtime value (rather than only as the `Wallet`
+ * *type*) breaks any bundler building this SDK for the browser, which is exactly where a
+ * wallet-less read-only client is most useful (public stats before a wallet connects).
+ */
+function ephemeralReadOnlyWallet(): Wallet {
+  const payer = Keypair.generate();
+  return {
+    publicKey: payer.publicKey,
+    async signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T> {
+      return signOne(payer, tx);
+    },
+    async signAllTransactions<T extends Transaction | VersionedTransaction>(txs: T[]): Promise<T[]> {
+      return txs.map((tx) => signOne(payer, tx));
+    },
+  };
 }
 
 /** Typed TypeScript SDK client for the staking_vault Anchor program. */
@@ -43,7 +85,7 @@ export class StakingVaultClient {
       this.hasWallet = true;
     } else {
       this.hasWallet = wallet !== undefined;
-      const effectiveWallet = wallet ?? new Wallet(Keypair.generate());
+      const effectiveWallet = wallet ?? ephemeralReadOnlyWallet();
       this.provider = new AnchorProvider(connectionOrProvider, effectiveWallet, { commitment: "confirmed" });
     }
     this.program = new Program(IDL as anchor.Idl, this.provider) as unknown as Program<StakingVault>;
