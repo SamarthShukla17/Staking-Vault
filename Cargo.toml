@@ -2,6 +2,9 @@
 members = [
     "programs/*"
 ]
+exclude = [
+    "programs/pinocchio-vault"
+]
 resolver = "2"
 
 [workspace.package]

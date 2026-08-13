@@ -155,3 +155,41 @@ yarn test:program                                                # 48 tests, ~30
      - 1.13 — Threat 8: missing or wrong signer
      - 1.14 — Threat 9: rounding theft + SECURITY.md final
    
+
+
+# Chapter 2 — Native Pinocchio Vault
+
+A second, independent native program (`programs/pinocchio-vault`) implementing the same
+staking protocol subset (init / stake / unstake) using [Pinocchio](https://github.com/anza-xyz/pinocchio) —
+`no_std`, zero-copy, zero external dependencies.
+
+## Why a native port?
+
+- Binary ≈10× smaller than the Anchor version
+- Compute-unit cost drops significantly (no Borsh, no framework overhead)
+- Proves the protocol logic independent of any framework
+
+## Building
+
+```bash
+bash scripts/build-pinocchio.sh
+```
+
+The Anchor program is unaffected — `anchor build` still works as before.
+
+## Testing
+
+```bash
+cargo test --manifest-path programs/pinocchio-vault/Cargo.toml
+```
+
+## Layout (updated)
+
+```
+programs/
+├── staking-vault/       # Anchor program (unchanged)
+└── pinocchio-vault/     # Native Pinocchio program (new)
+    ├── Cargo.toml       # standalone workspace
+    └── src/
+        └── lib.rs       # entrypoint + instruction dispatch
+```

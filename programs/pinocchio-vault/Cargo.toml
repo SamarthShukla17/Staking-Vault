@@ -1,0 +1,23 @@
+[package]
+name = "pinocchio_vault"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+# Detaching from root Anchor workspace
+[workspace]
+
+[dependencies]
+pinocchio                   = { version = "0.11", features = ["cpi"] }
+pinocchio-token             = "0.7.0"
+pinocchio-system            = "0.6"
+pinocchio-pubkey            = "0.3"
+solana-program-error = "3.0.1"
+
+[profile.release]
+overflow-checks = true
+opt-level       = 3
+lto             = "fat"
+codegen-units   = 1
