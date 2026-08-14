@@ -1,5 +1,8 @@
 #![no_std]
 
+pub mod error;
+pub mod state;
+
 use pinocchio::{
     program_entrypoint, default_allocator, nostd_panic_handler,
     AccountView, Address, ProgramResult,
