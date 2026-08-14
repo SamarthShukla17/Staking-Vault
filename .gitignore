@@ -10,3 +10,4 @@ dist/
 .yarn/
 .surfpool/
 .claude/settings.local.json
+.claude/skills/

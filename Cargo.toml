@@ -1,9 +1,6 @@
 [workspace]
 members = [
-    "programs/*"
-]
-exclude = [
-    "programs/pinocchio-vault"
+    "programs/staking-vault"
 ]
 resolver = "2"
 

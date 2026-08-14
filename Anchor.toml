@@ -1,6 +1,9 @@
 [toolchain]
 package_manager = "yarn"
 
+[workspace]
+exclude = ["programs/pinocchio-vault"]
+
 [features]
 resolution = true
 skip-lint = false
