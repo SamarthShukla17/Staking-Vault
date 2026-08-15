@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod error;
+pub mod instructions;
 pub mod state;
 
 use pinocchio::{
@@ -17,23 +18,19 @@ nostd_panic_handler!();
 
 pub fn process_instruction(
     _program_id: &Address,
-    _accounts: &mut [AccountView],
+    accounts: &mut [AccountView],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    let (tag, _data) = instruction_data
+    let (tag, data) = instruction_data
         .split_first()
         .ok_or(ProgramError::InvalidInstructionData)?;
 
     match tag {
-        0 => process_init(),
+        0 => instructions::initialize::process(accounts, data),
         1 => process_stake(),
         2 => process_unstake(),
         _ => Err(ProgramError::InvalidInstructionData),
     }
-}
-
-fn process_init() -> ProgramResult {
-    Ok(())
 }
 
 fn process_stake() -> ProgramResult {
