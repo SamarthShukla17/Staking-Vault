@@ -15,6 +15,14 @@ pinocchio-token             = "0.7.0"
 pinocchio-system            = "0.6"
 pinocchio-pubkey            = "0.3"
 solana-program-error = "3.0.1"
+shank = { version = "0.4.3", optional = true }
+
+[features]
+# Off by default so `cargo build-sbf` (the on-chain build) stays free of the
+# `shank` dependency. Enabled only for `cargo check --features idl` and by
+# `shank idl` when it statically parses this crate's source (see
+# src/shank.rs and scripts/generate-idl.sh).
+idl = ["dep:shank"]
 
 [dev-dependencies]
 mollusk-svm = "0.15.0"

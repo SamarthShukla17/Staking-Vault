@@ -1,0 +1,293 @@
+{
+  "version": "0.1.0",
+  "name": "pinocchio_vault",
+  "instructions": [
+    {
+      "name": "Initialize",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Pays for account creation; recorded as the pool admin"
+          ]
+        },
+        {
+          "name": "pool",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Pool PDA, seeds [\"pool\", stake_mint]"
+          ]
+        },
+        {
+          "name": "vault",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Vault SPL token account PDA, seeds [\"vault\", pool]"
+          ]
+        },
+        {
+          "name": "stakeMint",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Mint that may be staked into this pool"
+          ]
+        },
+        {
+          "name": "rewardMint",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Mint recorded for future reward claims"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "System program"
+          ]
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "SPL Token program"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "rewardRate",
+          "type": "u64"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 0
+      }
+    },
+    {
+      "name": "Stake",
+      "accounts": [
+        {
+          "name": "user",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Staker; pays for StakeAccount creation"
+          ]
+        },
+        {
+          "name": "pool",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Pool PDA, seeds [\"pool\", stake_mint]"
+          ]
+        },
+        {
+          "name": "stakeAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "StakeAccount PDA, seeds [\"stake\", pool, user]"
+          ]
+        },
+        {
+          "name": "userTokenAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Source SPL token account, owned by user"
+          ]
+        },
+        {
+          "name": "vault",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Pool's vault token account, seeds [\"vault\", pool]"
+          ]
+        },
+        {
+          "name": "stakeMint",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Mint staked into this pool"
+          ]
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "SPL Token program"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "System program"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 1
+      }
+    },
+    {
+      "name": "Unstake",
+      "accounts": [
+        {
+          "name": "user",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Staker; must own stake_account"
+          ]
+        },
+        {
+          "name": "pool",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Pool PDA, seeds [\"pool\", stake_mint]"
+          ]
+        },
+        {
+          "name": "stakeAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "StakeAccount PDA, seeds [\"stake\", pool, user]"
+          ]
+        },
+        {
+          "name": "userTokenAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Destination SPL token account"
+          ]
+        },
+        {
+          "name": "vault",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Pool's vault token account, seeds [\"vault\", pool]"
+          ]
+        },
+        {
+          "name": "stakeMint",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Mint staked into this pool"
+          ]
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "SPL Token program"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 2
+      }
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Pool",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "publicKey"
+          },
+          {
+            "name": "stakeMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "rewardMint",
+            "type": "publicKey"
+          },
+          {
+            "name": "rewardRate",
+            "type": "u64"
+          },
+          {
+            "name": "totalStaked",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StakeAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "publicKey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "points",
+            "type": "u128"
+          },
+          {
+            "name": "lastUpdateTs",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ],
+  "metadata": {
+    "origin": "shank",
+    "address": "GfNQXKxE2CzdeE4BLHZBUSYBQYDPCyg6bRs8dqe5af7u"
+  }
+}

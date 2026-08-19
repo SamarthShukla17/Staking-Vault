@@ -4,6 +4,9 @@ pub mod error;
 pub mod instructions;
 pub mod state;
 
+#[cfg(feature = "idl")]
+pub mod shank;
+
 use pinocchio::{
     program_entrypoint, default_allocator, nostd_panic_handler,
     AccountView, Address, ProgramResult,
