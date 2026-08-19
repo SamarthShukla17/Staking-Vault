@@ -28,11 +28,7 @@ pub fn process_instruction(
     match tag {
         0 => instructions::initialize::process(accounts, data),
         1 => instructions::stake::process(accounts, data),
-        2 => process_unstake(),
+        2 => instructions::unstake::process(accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
-}
-
-fn process_unstake() -> ProgramResult {
-    Ok(())
 }
